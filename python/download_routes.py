@@ -1,23 +1,29 @@
 import asyncio
 import json
 import os
+import time
 
 import aiohttp
 import folder_paths
 from aiohttp import web
 from server import PromptServer
 
-from .config_store import load_config
-from .paths import CHUNK_SIZE, LOCAL_REGISTRY_PATH
+from .config_store import get_r2_config, load_config
+from .paths import LOCAL_REGISTRY_PATH
+from .rclone_ops import (
+    build_rclone_s3_copyto_cmd,
+    ensure_rclone_remote,
+    prefer_rclone_download,
+    r2_model_object_key,
+    run_rclone_with_progress,
+)
 from .registry import find_entry, get_registry_path, load_registry
 from .streaming import client_disconnected, prepare_ndjson
 
 routes = PromptServer.instance.routes
 
-
-def write_chunk(path, data, mode="ab"):
-    with open(path, mode) as out:
-        out.write(data)
+HTTP_READ_CHUNK = 4 * 1024 * 1024
+PROGRESS_INTERVAL_SEC = 0.25
 
 
 def registry_available():
@@ -25,6 +31,50 @@ def registry_available():
         return True
     models = load_config().get("models") or []
     return isinstance(models, list) and len(models) > 0
+
+
+async def download_via_http(url, temp_file, request, send_event):
+    timeout = aiohttp.ClientTimeout(total=None, connect=60, sock_read=300)
+    last_progress_at = 0.0
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url) as resp:
+            if resp.status >= 400:
+                raise RuntimeError(f"HTTP {resp.status}")
+
+            total = int(resp.headers.get("Content-Length") or 0)
+            downloaded = 0
+            await send_event(
+                {
+                    "type": "progress",
+                    "downloaded": 0,
+                    "total": total,
+                    "percent": 0 if total else None,
+                }
+            )
+
+            with open(temp_file, "wb") as out:
+                async for chunk in resp.content.iter_chunked(HTTP_READ_CHUNK):
+                    if await client_disconnected(request):
+                        raise asyncio.CancelledError("Download cancelled")
+                    if not chunk:
+                        continue
+                    await asyncio.to_thread(out.write, chunk)
+                    downloaded += len(chunk)
+                    now = time.monotonic()
+                    if now - last_progress_at >= PROGRESS_INTERVAL_SEC or (
+                        total and downloaded >= total
+                    ):
+                        percent = round(downloaded * 100 / total) if total else None
+                        await send_event(
+                            {
+                                "type": "progress",
+                                "downloaded": downloaded,
+                                "total": total,
+                                "percent": percent,
+                            }
+                        )
+                        last_progress_at = now
 
 
 @routes.get("/tasty-r2/list")
@@ -87,6 +137,9 @@ async def download_model(request):
     dest_file = os.path.join(dest_dir, filename)
     temp_file = dest_file + ".partial"
 
+    r2 = get_r2_config()
+    use_rclone = prefer_rclone_download(r2, url)
+
     response, send_event = await prepare_ndjson(request)
 
     try:
@@ -95,41 +148,13 @@ async def download_model(request):
 
         await send_event({"type": "progress", "downloaded": 0, "total": 0, "percent": 0})
 
-        timeout = aiohttp.ClientTimeout(total=None, connect=60, sock_read=300)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as resp:
-                if resp.status >= 400:
-                    await send_event({"type": "error", "error": f"HTTP {resp.status}"})
-                    await response.write_eof()
-                    return response
-
-                total = int(resp.headers.get("Content-Length") or 0)
-                downloaded = 0
-                await send_event(
-                    {
-                        "type": "progress",
-                        "downloaded": 0,
-                        "total": total,
-                        "percent": 0 if total else None,
-                    }
-                )
-
-                async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
-                    if await client_disconnected(request):
-                        raise asyncio.CancelledError("Download cancelled")
-                    if not chunk:
-                        continue
-                    await asyncio.to_thread(write_chunk, temp_file, chunk, "ab")
-                    downloaded += len(chunk)
-                    percent = round(downloaded * 100 / total) if total else None
-                    await send_event(
-                        {
-                            "type": "progress",
-                            "downloaded": downloaded,
-                            "total": total,
-                            "percent": percent,
-                        }
-                    )
+        if use_rclone:
+            remote = await asyncio.to_thread(ensure_rclone_remote, r2)
+            src = f"{remote}:{r2['bucket']}/{r2_model_object_key(save_path, filename)}"
+            cmd = build_rclone_s3_copyto_cmd(r2, src, temp_file, upload=False)
+            await run_rclone_with_progress(cmd, 0, request, send_event)
+        else:
+            await download_via_http(url, temp_file, request, send_event)
 
         await asyncio.to_thread(os.replace, temp_file, dest_file)
     except asyncio.CancelledError:

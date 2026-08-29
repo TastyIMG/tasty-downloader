@@ -9,17 +9,16 @@ from server import PromptServer
 
 from .config_store import get_r2_config, r2_is_configured
 from .rclone_ops import (
+    build_rclone_s3_copyto_cmd,
     ensure_rclone_remote,
-    parse_rclone_progress,
     rclone_available,
-    rclone_bin,
     registry_key,
     registered_keys,
+    run_rclone_with_progress,
     scan_push_candidates,
-    split_rclone_output,
 )
 from .registry import append_local_registry
-from .streaming import client_disconnected, prepare_ndjson
+from .streaming import prepare_ndjson
 
 routes = PromptServer.instance.routes
 
@@ -80,120 +79,16 @@ async def push_model(request):
     public_url = f"{public_base}/models/{save_path}/{filename}"
 
     response, send_event = await prepare_ndjson(request)
-    proc = None
 
     try:
-        # Same idea as download: emit real progress events as bytes move.
         await send_event(
             {"type": "progress", "downloaded": 0, "total": file_size, "percent": 0}
         )
 
         remote = await asyncio.to_thread(ensure_rclone_remote, r2)
-        await send_event(
-            {"type": "progress", "downloaded": 0, "total": file_size, "percent": 0}
-        )
-
-        rclone = rclone_bin()
         dest = f"{remote}:{r2['bucket']}/models/{save_path}/{filename}"
-        # Match the working manual flags; avoid --use-json-log (hides/breaks useful errors).
-        cmd = [
-            rclone,
-            "copyto",
-            src,
-            dest,
-            "-v",
-            "--s3-no-check-bucket",
-            "--s3-chunk-size",
-            str(r2.get("chunk_size") or "64M"),
-            "--s3-upload-concurrency",
-            str(r2.get("upload_concurrency") or 8),
-            "--progress",
-            "--stats",
-            "1s",
-            "--stats-one-line",
-        ]
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-
-        assert proc.stdout is not None
-        buffer = ""
-        last_downloaded = 0
-        log_tail = []
-
-        def remember(line: str):
-            log_tail.append(line)
-            if len(log_tail) > 40:
-                del log_tail[:-40]
-
-        while True:
-            if await client_disconnected(request):
-                proc.terminate()
-                raise asyncio.CancelledError("Push cancelled")
-
-            chunk = await proc.stdout.read(4096)
-            if not chunk:
-                break
-
-            buffer += chunk.decode("utf-8", errors="replace")
-            lines, buffer = split_rclone_output(buffer)
-
-            for text in lines:
-                remember(text)
-                downloaded, total, percent = parse_rclone_progress(text, file_size)
-                # Never clobber UI with empty parses (was stuck at 0 B).
-                if downloaded is None and percent is None:
-                    continue
-                if downloaded is None:
-                    downloaded = last_downloaded
-                else:
-                    last_downloaded = downloaded
-                total = total if total else file_size
-                if percent is None and total:
-                    percent = round(downloaded * 100 / total)
-                await send_event(
-                    {
-                        "type": "progress",
-                        "downloaded": downloaded,
-                        "total": total,
-                        "percent": percent,
-                    }
-                )
-
-        if buffer.strip():
-            remember(buffer.strip())
-            downloaded, total, percent = parse_rclone_progress(buffer, file_size)
-            if downloaded is not None or percent is not None:
-                if downloaded is None:
-                    downloaded = last_downloaded
-                total = total if total else file_size
-                if percent is None and total:
-                    percent = round(downloaded * 100 / total)
-                await send_event(
-                    {
-                        "type": "progress",
-                        "downloaded": downloaded,
-                        "total": total,
-                        "percent": percent,
-                    }
-                )
-
-        code = await proc.wait()
-        if code != 0:
-            # Prefer error-looking lines; fall back to last output.
-            interesting = [
-                line
-                for line in log_tail
-                if any(
-                    needle in line.lower()
-                    for needle in ("error", "failed", "denied", "forbidden", "404", "403", "401")
-                )
-            ]
-            detail = " | ".join(interesting[-5:] or log_tail[-5:] or ["(no rclone output)"])
-            raise RuntimeError(f"rclone exited with code {code}: {detail}")
+        cmd = build_rclone_s3_copyto_cmd(r2, src, dest, upload=True)
+        await run_rclone_with_progress(cmd, file_size, request, send_event)
 
         entry = {
             "for_model": Path(filename).stem,
@@ -225,24 +120,12 @@ async def push_model(request):
         await response.write_eof()
         return response
     except asyncio.CancelledError:
-        if proc and proc.returncode is None:
-            proc.terminate()
-            try:
-                await proc.wait()
-            except Exception:
-                pass
         try:
             await response.write_eof()
         except Exception:
             pass
         return response
     except Exception as exc:
-        if proc and proc.returncode is None:
-            proc.terminate()
-            try:
-                await proc.wait()
-            except Exception:
-                pass
         try:
             await send_event({"type": "error", "error": str(exc)})
             await response.write_eof()
