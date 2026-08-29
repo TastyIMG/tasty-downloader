@@ -1,4 +1,4 @@
-from . import server
+from .python import server  # noqa: F401 — registers HTTP routes
 
 WEB_DIRECTORY = "js"
 NODE_CLASS_MAPPINGS = {}

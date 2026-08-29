@@ -1,6 +1,11 @@
 import { api } from "../../scripts/api.js";
 import { app } from "../../scripts/app.js";
 
+const CATEGORY_ORDER = [
+  "checkpoints", "unet", "diffusion_models", "loras", "vae", "clip",
+  "clip_vision", "controlnet", "upscale_models", "embeddings", "hypernetworks",
+];
+
 const styles = `
 .tasty-r2-overlay {
   position: fixed;
@@ -15,8 +20,8 @@ const styles = `
   background: #353535;
   border: 1px solid #555;
   border-radius: 8px;
-  min-width: 520px;
-  max-width: 90vw;
+  min-width: 560px;
+  width: min(720px, 92vw);
   max-height: 80vh;
   display: flex;
   flex-direction: column;
@@ -41,9 +46,33 @@ const styles = `
   font-size: 20px;
   cursor: pointer;
 }
+.tasty-r2-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid #555;
+  padding: 0 8px;
+}
+.tasty-r2-tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #aaa;
+  padding: 10px 14px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.tasty-r2-tab:hover {
+  color: #eee;
+}
+.tasty-r2-tab.active {
+  color: #fff;
+  border-bottom-color: #6af;
+}
 .tasty-r2-body {
   overflow-y: auto;
   padding: 4px 0 8px;
+  flex: 1;
+  min-height: 200px;
 }
 .tasty-r2-section {
   border-bottom: 1px solid #444;
@@ -127,6 +156,7 @@ const styles = `
   border-radius: 4px;
   cursor: pointer;
   font-size: 12px;
+  width: 100%;
 }
 .tasty-r2-btn:hover:not(:disabled) {
   background: #555;
@@ -141,6 +171,21 @@ const styles = `
   background: #2f4f3a;
   border-color: #4a7;
   color: #cfc;
+}
+.tasty-r2-btn.push {
+  background: #2a3a55;
+  border-color: #4a6a9a;
+  color: #cde;
+}
+.tasty-r2-btn.push:hover:not(:disabled) {
+  background: #334866;
+}
+.tasty-r2-btn.push.done {
+  opacity: 1;
+  cursor: default;
+  background: #243a5c;
+  border-color: #4a8adf;
+  color: #bcdcff;
 }
 .tasty-r2-action {
   min-width: 110px;
@@ -167,6 +212,9 @@ const styles = `
   background: #6a9;
   width: 0%;
   transition: width 0.15s ease;
+}
+.tasty-r2-progress-fill.push {
+  background: #6af;
 }
 .tasty-r2-progress-label {
   font-size: 10px;
@@ -197,6 +245,53 @@ const styles = `
   color: #f88;
   font-size: 12px;
 }
+.tasty-r2-settings {
+  padding: 12px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.tasty-r2-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tasty-r2-field label {
+  font-size: 12px;
+  color: #bbb;
+}
+.tasty-r2-field input,
+.tasty-r2-field textarea {
+  background: #2a2a2a;
+  border: 1px solid #555;
+  border-radius: 4px;
+  color: #eee;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.tasty-r2-field textarea {
+  min-height: 64px;
+  resize: vertical;
+}
+.tasty-r2-settings-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+.tasty-r2-settings-actions .tasty-r2-btn {
+  width: auto;
+  padding: 6px 14px;
+}
+.tasty-r2-hint {
+  font-size: 11px;
+  color: #888;
+  line-height: 1.4;
+}
+.tasty-r2-status {
+  font-size: 12px;
+  color: #8c8;
+}
 `;
 
 function formatBytes(bytes) {
@@ -212,10 +307,17 @@ class TastyR2Modal {
     this.overlay = null;
     this.body = null;
     this.errorEl = null;
+    this.tabsEl = null;
+    this.tab = "download";
     this.downloading = new Set();
     this.downloaded = new Set();
+    this.pushing = new Set();
+    this.pushed = new Set();
     this.abortControllers = new Map();
-    this.openSections = new Set();
+    this.openSections = {
+      download: new Set(),
+      push: new Set(),
+    };
   }
 
   ensureStyles() {
@@ -236,6 +338,11 @@ class TastyR2Modal {
           <h2>Tasty Downloader</h2>
           <button class="tasty-r2-close" type="button">&times;</button>
         </div>
+        <div class="tasty-r2-tabs">
+          <button class="tasty-r2-tab active" data-tab="download" type="button">Download</button>
+          <button class="tasty-r2-tab" data-tab="push" type="button">Push</button>
+          <button class="tasty-r2-tab" data-tab="settings" type="button">Settings</button>
+        </div>
         <div class="tasty-r2-error"></div>
         <div class="tasty-r2-body">Loading...</div>
       </div>
@@ -243,11 +350,15 @@ class TastyR2Modal {
     document.body.appendChild(this.overlay);
     this.body = this.overlay.querySelector(".tasty-r2-body");
     this.errorEl = this.overlay.querySelector(".tasty-r2-error");
+    this.tabsEl = this.overlay.querySelector(".tasty-r2-tabs");
     this.overlay.querySelector(".tasty-r2-close").onclick = () => this.close();
     this.overlay.addEventListener("click", (e) => {
       if (e.target === this.overlay) this.close();
     });
-    this.refresh();
+    for (const tab of this.tabsEl.querySelectorAll(".tasty-r2-tab")) {
+      tab.onclick = () => this.setTab(tab.dataset.tab);
+    }
+    this.setTab(this.tab || "download");
   }
 
   close() {
@@ -258,7 +369,6 @@ class TastyR2Modal {
     if (this.overlay) {
       this.overlay.remove();
       this.overlay = null;
-      this.openSections.clear();
     }
   }
 
@@ -266,37 +376,36 @@ class TastyR2Modal {
     if (this.errorEl) this.errorEl.textContent = msg || "";
   }
 
-  async refresh() {
-    this.setError("");
-    try {
-      const resp = await api.fetchApi("/tasty-r2/list");
-      const data = await resp.json();
-      if (!resp.ok) {
-        throw new Error(data.error || "Failed to load registry");
+  setTab(tab) {
+    this.tab = tab;
+    if (this.tabsEl) {
+      for (const btn of this.tabsEl.querySelectorAll(".tasty-r2-tab")) {
+        btn.classList.toggle("active", btn.dataset.tab === tab);
       }
-      if (!Array.isArray(data)) {
-        throw new Error("Invalid registry response");
-      }
-      for (const item of data) {
-        if (item.exists) this.downloaded.add(item.filename);
-      }
-      this.render(data);
-    } catch (err) {
-      this.body.innerHTML = `<div class="tasty-r2-empty">Failed to load list</div>`;
-      this.setError(String(err));
     }
+    this.setError("");
+    if (tab === "download") this.refreshDownload();
+    else if (tab === "push") this.refreshPush();
+    else this.refreshSettings();
   }
 
-  render(items) {
+  sortCategories(keys) {
+    return [...keys].sort((a, b) => {
+      const ai = CATEGORY_ORDER.indexOf(a);
+      const bi = CATEGORY_ORDER.indexOf(b);
+      if (ai === -1 && bi === -1) return a.localeCompare(b);
+      if (ai === -1) return 1;
+      if (bi === -1) return -1;
+      return ai - bi;
+    });
+  }
+
+  renderGrouped(items, sectionKey, rowBuilder, emptyMsg) {
     if (!items.length) {
-      this.body.innerHTML = `<div class="tasty-r2-empty">No models in registry.json</div>`;
+      this.body.innerHTML = `<div class="tasty-r2-empty">${emptyMsg}</div>`;
       return;
     }
 
-    const order = [
-      "checkpoints", "unet", "diffusion_models", "loras", "vae", "clip",
-      "clip_vision", "controlnet", "upscale_models", "embeddings", "hypernetworks",
-    ];
     const grouped = new Map();
     for (const item of items) {
       const key = item.save_path || "other";
@@ -304,25 +413,16 @@ class TastyR2Modal {
       grouped.get(key).push(item);
     }
 
-    const categories = [...grouped.keys()].sort((a, b) => {
-      const ai = order.indexOf(a);
-      const bi = order.indexOf(b);
-      if (ai === -1 && bi === -1) return a.localeCompare(b);
-      if (ai === -1) return 1;
-      if (bi === -1) return -1;
-      return ai - bi;
-    });
-
-    if (!this.openSections.size) {
-      for (const cat of categories) {
-        this.openSections.add(cat);
-      }
+    const categories = this.sortCategories(grouped.keys());
+    const openSet = this.openSections[sectionKey];
+    if (!openSet.size) {
+      for (const cat of categories) openSet.add(cat);
     }
 
     this.body.innerHTML = "";
     for (const category of categories) {
       const sectionItems = grouped.get(category);
-      const isOpen = this.openSections.has(category);
+      const isOpen = openSet.has(category);
 
       const section = document.createElement("div");
       section.className = `tasty-r2-section${isOpen ? " open" : ""}`;
@@ -336,19 +436,17 @@ class TastyR2Modal {
         <span class="tasty-r2-section-meta">${sectionItems.length}</span>
       `;
       header.onclick = () => {
-        if (this.openSections.has(category)) {
-          this.openSections.delete(category);
-        } else {
-          this.openSections.add(category);
-        }
+        if (openSet.has(category)) openSet.delete(category);
+        else openSet.add(category);
         section.classList.toggle("open");
-        header.querySelector(".tasty-r2-chevron").textContent = section.classList.contains("open") ? "▼" : "▶";
+        header.querySelector(".tasty-r2-chevron").textContent =
+          section.classList.contains("open") ? "▼" : "▶";
       };
 
       const body = document.createElement("div");
       body.className = "tasty-r2-section-body";
       for (const item of sectionItems) {
-        body.appendChild(this.renderRow(item));
+        body.appendChild(rowBuilder(item));
       }
 
       section.append(header, body);
@@ -356,7 +454,71 @@ class TastyR2Modal {
     }
   }
 
-  renderRow(item) {
+  async refreshDownload() {
+    this.body.innerHTML = `<div class="tasty-r2-empty">Loading...</div>`;
+    try {
+      const resp = await api.fetchApi("/tasty-r2/list");
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || "Failed to load registry");
+      if (!Array.isArray(data)) throw new Error("Invalid registry response");
+      for (const item of data) {
+        if (item.exists) this.downloaded.add(item.filename);
+      }
+      this.renderGrouped(
+        data,
+        "download",
+        (item) => this.renderDownloadRow(item),
+        "No models in registry",
+      );
+    } catch (err) {
+      this.body.innerHTML = `<div class="tasty-r2-empty">Failed to load list</div>`;
+      this.setError(String(err.message || err));
+    }
+  }
+
+  async refreshPush() {
+    this.body.innerHTML = `<div class="tasty-r2-empty">Loading...</div>`;
+    try {
+      const resp = await api.fetchApi("/tasty-r2/push-list");
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || "Failed to load push list");
+
+      if (!data.rclone_available) {
+        this.body.innerHTML = `<div class="tasty-r2-empty">rclone is not installed on this machine.<br>Install it, then reopen this tab.</div>`;
+        return;
+      }
+      if (!data.configured) {
+        this.body.innerHTML = `<div class="tasty-r2-empty">Configure R2 credentials in Settings first.</div>`;
+        return;
+      }
+
+      const items = (data.items || []).filter((item) => !this.pushed.has(item.filename));
+      this.renderGrouped(
+        items,
+        "push",
+        (item) => this.renderPushRow(item),
+        "No unregistered local models to push",
+      );
+    } catch (err) {
+      this.body.innerHTML = `<div class="tasty-r2-empty">Failed to load push list</div>`;
+      this.setError(String(err.message || err));
+    }
+  }
+
+  async refreshSettings() {
+    this.body.innerHTML = `<div class="tasty-r2-empty">Loading...</div>`;
+    try {
+      const resp = await api.fetchApi("/tasty-r2/settings");
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || "Failed to load settings");
+      this.renderSettings(data);
+    } catch (err) {
+      this.body.innerHTML = `<div class="tasty-r2-empty">Failed to load settings</div>`;
+      this.setError(String(err.message || err));
+    }
+  }
+
+  renderDownloadRow(item) {
     const row = document.createElement("div");
     row.className = "tasty-r2-row";
 
@@ -377,12 +539,39 @@ class TastyR2Modal {
 
     const action = document.createElement("div");
     action.className = "tasty-r2-action";
-    action.appendChild(this.createActionButton(item.filename));
+    action.appendChild(this.createDownloadButton(item.filename));
     row.append(info, action);
     return row;
   }
 
-  createActionButton(filename) {
+  renderPushRow(item) {
+    const row = document.createElement("div");
+    row.className = "tasty-r2-row";
+
+    const info = document.createElement("div");
+    info.className = "tasty-r2-info";
+
+    const forModel = document.createElement("div");
+    forModel.className = "tasty-r2-for";
+    forModel.textContent = item.for_model || item.filename;
+    forModel.title = item.for_model || item.filename;
+
+    const filename = document.createElement("div");
+    filename.className = "tasty-r2-filename";
+    const sizeLabel = item.size ? ` · ${formatBytes(item.size)}` : "";
+    filename.textContent = `${item.filename}${sizeLabel}`;
+    filename.title = item.filename;
+
+    info.append(forModel, filename);
+
+    const action = document.createElement("div");
+    action.className = "tasty-r2-action";
+    action.appendChild(this.createPushButton(item));
+    row.append(info, action);
+    return row;
+  }
+
+  createDownloadButton(filename) {
     const btn = document.createElement("button");
     btn.className = "tasty-r2-btn";
     btn.type = "button";
@@ -403,12 +592,34 @@ class TastyR2Modal {
     return btn;
   }
 
-  createProgress(actionEl, onCancel) {
+  createPushButton(item) {
+    const btn = document.createElement("button");
+    btn.className = "tasty-r2-btn push";
+    btn.type = "button";
+    const key = `${item.save_path}/${item.filename}`;
+
+    if (this.pushed.has(item.filename)) {
+      btn.textContent = "Pushed";
+      btn.classList.add("done");
+      btn.disabled = true;
+      return btn;
+    }
+
+    btn.textContent = "Push";
+    btn.disabled = this.pushing.has(key);
+    btn.onclick = () => {
+      const action = btn.parentElement;
+      if (action) this.push(item, action);
+    };
+    return btn;
+  }
+
+  createProgress(actionEl, onCancel, { push = false } = {}) {
     actionEl.innerHTML = `
       <div class="tasty-r2-progress">
         <div class="tasty-r2-progress-top">
           <div class="tasty-r2-progress-bar">
-            <div class="tasty-r2-progress-fill"></div>
+            <div class="tasty-r2-progress-fill${push ? " push" : ""}"></div>
           </div>
           <button class="tasty-r2-cancel" type="button">Cancel</button>
         </div>
@@ -444,16 +655,10 @@ class TastyR2Modal {
     }
 
     progressEl.fill.style.width = "100%";
-    progressEl.label.textContent = formatBytes(downloaded);
+    progressEl.label.textContent = downloaded ? formatBytes(downloaded) : "Uploading...";
   }
 
-  restoreDownloadButton(actionEl, filename) {
-    if (!actionEl?.isConnected) return;
-    actionEl.innerHTML = "";
-    actionEl.appendChild(this.createActionButton(filename));
-  }
-
-  parseDownloadEvent(line) {
+  parseStreamEvent(line) {
     if (!line.trim()) return null;
     try {
       return JSON.parse(line);
@@ -462,7 +667,7 @@ class TastyR2Modal {
     }
   }
 
-  handleDownloadEvent(event, progressEl) {
+  handleStreamEvent(event, progressEl) {
     if (!event) return false;
     if (event.type === "progress") {
       this.updateProgress(progressEl, event);
@@ -474,9 +679,54 @@ class TastyR2Modal {
       return true;
     }
     if (event.type === "error") {
-      throw new Error(event.error || "Download failed");
+      throw new Error(event.error || "Operation failed");
     }
     return false;
+  }
+
+  async consumeNdjson(resp, progressEl, abortController) {
+    if (!resp.body) throw new Error("Empty response");
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let doneReceived = false;
+    let cancelled = false;
+
+    try {
+      while (true) {
+        if (abortController.signal.aborted) {
+          await reader.cancel();
+          cancelled = true;
+          break;
+        }
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (this.handleStreamEvent(this.parseStreamEvent(line), progressEl)) {
+            doneReceived = true;
+          }
+        }
+      }
+    } catch (err) {
+      if (err?.name === "AbortError" || abortController.signal.aborted) {
+        return { cancelled: true, doneReceived: false };
+      }
+      throw err;
+    }
+
+    if (!cancelled) {
+      buffer += decoder.decode();
+      for (const line of buffer.split("\n")) {
+        if (this.handleStreamEvent(this.parseStreamEvent(line), progressEl)) {
+          doneReceived = true;
+        }
+      }
+    }
+
+    return { cancelled, doneReceived };
   }
 
   async download(filename, actionEl) {
@@ -484,7 +734,7 @@ class TastyR2Modal {
     this.downloading.add(filename);
 
     const abortController = new AbortController();
-    this.abortControllers.set(filename, abortController);
+    this.abortControllers.set(`dl:${filename}`, abortController);
 
     const progressEl = this.createProgress(actionEl, () => {
       abortController.abort();
@@ -496,7 +746,6 @@ class TastyR2Modal {
     let succeeded = false;
     let cancelled = false;
     try {
-      // Same path helper as /tasty-r2/list — do not call api.apiURL() bare.
       const resp = await api.fetchApi("/tasty-r2/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -511,60 +760,15 @@ class TastyR2Modal {
           const data = JSON.parse(text);
           if (data.error) message = data.error;
         } catch {
-          // use raw response text
+          // raw text
         }
         throw new Error(message);
       }
 
-      if (!resp.body) {
-        throw new Error("Download failed: empty response");
-      }
-
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let doneReceived = false;
-
-      try {
-        while (true) {
-          if (abortController.signal.aborted) {
-            await reader.cancel();
-            cancelled = true;
-            break;
-          }
-
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-
-          for (const line of lines) {
-            if (this.handleDownloadEvent(this.parseDownloadEvent(line), progressEl)) {
-              doneReceived = true;
-            }
-          }
-        }
-      } catch (err) {
-        if (err?.name === "AbortError" || abortController.signal.aborted) {
-          cancelled = true;
-        } else {
-          throw err;
-        }
-      }
-
+      const result = await this.consumeNdjson(resp, progressEl, abortController);
+      cancelled = result.cancelled;
       if (!cancelled) {
-        buffer += decoder.decode();
-        for (const line of buffer.split("\n")) {
-          if (this.handleDownloadEvent(this.parseDownloadEvent(line), progressEl)) {
-            doneReceived = true;
-          }
-        }
-
-        if (!doneReceived) {
-          throw new Error("Download ended unexpectedly");
-        }
+        if (!result.doneReceived) throw new Error("Download ended unexpectedly");
         this.downloaded.add(filename);
         succeeded = true;
       }
@@ -576,15 +780,198 @@ class TastyR2Modal {
       }
     } finally {
       this.downloading.delete(filename);
-      this.abortControllers.delete(filename);
-      if (succeeded) {
-        await new Promise((r) => setTimeout(r, 800));
-      } else if (cancelled && progressEl.label) {
+      this.abortControllers.delete(`dl:${filename}`);
+      if (succeeded) await new Promise((r) => setTimeout(r, 800));
+      else if (cancelled && progressEl.label) {
         progressEl.label.textContent = "Cancelled";
         await new Promise((r) => setTimeout(r, 500));
       }
-      this.restoreDownloadButton(actionEl, filename);
+      if (actionEl?.isConnected) {
+        actionEl.innerHTML = "";
+        actionEl.appendChild(this.createDownloadButton(filename));
+      }
     }
+  }
+
+  async push(item, actionEl) {
+    const key = `${item.save_path}/${item.filename}`;
+    if (this.pushing.has(key)) return;
+    this.pushing.add(key);
+
+    const abortController = new AbortController();
+    this.abortControllers.set(`push:${key}`, abortController);
+
+    const progressEl = this.createProgress(actionEl, () => {
+      abortController.abort();
+      if (progressEl.label) progressEl.label.textContent = "Cancelling...";
+      if (progressEl.cancelBtn) progressEl.cancelBtn.disabled = true;
+    }, { push: true });
+    this.setError("");
+
+    let succeeded = false;
+    let cancelled = false;
+    try {
+      const resp = await api.fetchApi("/tasty-r2/push", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: item.filename, save_path: item.save_path }),
+        signal: abortController.signal,
+      });
+
+      if (!resp.ok) {
+        const text = await resp.text();
+        let message = text || "Push failed";
+        try {
+          const data = JSON.parse(text);
+          if (data.error) message = data.error;
+        } catch {
+          // raw text
+        }
+        throw new Error(message);
+      }
+
+      const result = await this.consumeNdjson(resp, progressEl, abortController);
+      cancelled = result.cancelled;
+      if (!cancelled) {
+        if (!result.doneReceived) throw new Error("Push ended unexpectedly");
+        this.pushed.add(item.filename);
+        succeeded = true;
+      }
+    } catch (err) {
+      if (err?.name === "AbortError" || abortController.signal.aborted) {
+        cancelled = true;
+      } else {
+        this.setError(`${item.filename}: ${err.message || err}`);
+      }
+    } finally {
+      this.pushing.delete(key);
+      this.abortControllers.delete(`push:${key}`);
+      if (succeeded) {
+        if (progressEl.label) progressEl.label.textContent = "Pushed";
+        await new Promise((r) => setTimeout(r, 800));
+        if (actionEl?.isConnected) {
+          actionEl.innerHTML = "";
+          actionEl.appendChild(this.createPushButton(item));
+        }
+      } else if (cancelled && progressEl.label) {
+        progressEl.label.textContent = "Cancelled";
+        await new Promise((r) => setTimeout(r, 500));
+        if (actionEl?.isConnected) {
+          actionEl.innerHTML = "";
+          actionEl.appendChild(this.createPushButton(item));
+        }
+      } else if (actionEl?.isConnected) {
+        actionEl.innerHTML = "";
+        actionEl.appendChild(this.createPushButton(item));
+      }
+    }
+  }
+
+  renderSettings(data) {
+    const folders = (data.push_folders || []).join(", ");
+    this.body.innerHTML = `
+      <form class="tasty-r2-settings">
+        <div class="tasty-r2-hint">
+          Credentials are saved to this machine's gitignored <code>config.json</code>
+          and used to configure rclone (64MB multipart chunks).
+          ${data.rclone_available ? "" : "<br><strong>rclone is not installed.</strong>"}
+        </div>
+        <div class="tasty-r2-field">
+          <label>Account ID</label>
+          <input name="account_id" value="${this.escapeAttr(data.account_id || "")}" autocomplete="off" />
+        </div>
+        <div class="tasty-r2-field">
+          <label>Access Key ID ${data.access_key_configured ? "(saved)" : ""}</label>
+          <input name="access_key_id" type="password" placeholder="${data.access_key_configured ? "********" : ""}" autocomplete="off" />
+        </div>
+        <div class="tasty-r2-field">
+          <label>Secret Access Key ${data.secret_configured ? "(saved)" : ""}</label>
+          <input name="secret_access_key" type="password" placeholder="${data.secret_configured ? "********" : ""}" autocomplete="off" />
+        </div>
+        <div class="tasty-r2-field">
+          <label>Bucket</label>
+          <input name="bucket" value="${this.escapeAttr(data.bucket || "")}" />
+        </div>
+        <div class="tasty-r2-field">
+          <label>Endpoint (optional — built from account id if empty)</label>
+          <input name="endpoint" value="${this.escapeAttr(data.endpoint || "")}" placeholder="https://ACCOUNT_ID.r2.cloudflarestorage.com" />
+        </div>
+        <div class="tasty-r2-field">
+          <label>Public base URL</label>
+          <input name="public_base_url" value="${this.escapeAttr(data.public_base_url || "")}" placeholder="https://pub-….r2.dev" />
+        </div>
+        <div class="tasty-r2-field">
+          <label>Push folders (comma-separated)</label>
+          <textarea name="push_folders">${this.escapeText(folders)}</textarea>
+        </div>
+        <div class="tasty-r2-field">
+          <label>Chunk size</label>
+          <input name="chunk_size" value="${this.escapeAttr(data.chunk_size || "64M")}" />
+        </div>
+        <div class="tasty-r2-settings-actions">
+          <button class="tasty-r2-btn" type="submit">Save</button>
+          <button class="tasty-r2-btn" type="button" data-action="test">Save &amp; Test</button>
+        </div>
+        <div class="tasty-r2-status" data-status></div>
+      </form>
+    `;
+
+    const form = this.body.querySelector("form");
+    const status = this.body.querySelector("[data-status]");
+    const testBtn = this.body.querySelector('[data-action="test"]');
+
+    const submit = async (test) => {
+      this.setError("");
+      status.textContent = test ? "Saving & testing..." : "Saving...";
+      const fd = new FormData(form);
+      const payload = {
+        account_id: fd.get("account_id") || "",
+        access_key_id: fd.get("access_key_id") || "",
+        secret_access_key: fd.get("secret_access_key") || "",
+        bucket: fd.get("bucket") || "",
+        endpoint: fd.get("endpoint") || "",
+        public_base_url: fd.get("public_base_url") || "",
+        chunk_size: fd.get("chunk_size") || "64M",
+        push_folders: fd.get("push_folders") || "",
+        test,
+      };
+      try {
+        const resp = await api.fetchApi("/tasty-r2/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.ok === false) {
+          throw new Error(data.error || "Save failed");
+        }
+        status.textContent = test ? "Saved. Connection OK." : "Saved.";
+        form.querySelector('[name="access_key_id"]').value = "";
+        form.querySelector('[name="secret_access_key"]').value = "";
+      } catch (err) {
+        status.textContent = "";
+        this.setError(String(err.message || err));
+      }
+    };
+
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      submit(false);
+    };
+    testBtn.onclick = () => submit(true);
+  }
+
+  escapeAttr(value) {
+    return String(value)
+      .replace(/&/g, "&amp;")
+      .replace(/"/g, "&quot;")
+      .replace(/</g, "&lt;");
+  }
+
+  escapeText(value) {
+    return String(value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;");
   }
 }
 
