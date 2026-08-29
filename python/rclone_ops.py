@@ -91,8 +91,6 @@ def scan_push_candidates():
             full = os.path.join(folder, name)
             if not os.path.isfile(full):
                 continue
-            if name in registered:
-                continue
             try:
                 size = os.path.getsize(full)
             except OSError:
@@ -103,6 +101,8 @@ def scan_push_candidates():
                     "save_path": save_path,
                     "for_model": Path(name).stem,
                     "size": size,
+                    # Same idea as download list `exists`: persisted done-state
+                    "registered": name in registered,
                 }
             )
 
