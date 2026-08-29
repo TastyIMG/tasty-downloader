@@ -94,6 +94,9 @@ async def list_models(_request):
                 "save_path": save_path,
                 "url": url,
                 "for_model": entry.get("for_model", ""),
+                "exists": os.path.isfile(
+                    os.path.join(folder_paths.models_dir, save_path, filename)
+                ),
             }
         )
     return web.json_response(result)
