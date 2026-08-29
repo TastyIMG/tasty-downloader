@@ -39,11 +39,23 @@ def _parse_registry(data):
     return []
 
 
+def _is_placeholder_entry(entry):
+    """Skip docs/example entries so they never show in the UI."""
+    url = (entry.get("url") or "").lower()
+    filename = (entry.get("filename") or "").lower()
+    if "pub-xxxx" in url or "example.com" in url:
+        return True
+    if filename.startswith("example_"):
+        return True
+    return False
+
+
 def _read_registry_file(path):
     if not path.exists():
         return []
     with open(path, "r", encoding="utf-8") as f:
-        return _parse_registry(json.load(f))
+        entries = _parse_registry(json.load(f))
+    return [e for e in entries if isinstance(e, dict) and not _is_placeholder_entry(e)]
 
 
 def _load_registry():
@@ -176,6 +188,8 @@ async def download_model(request):
                 )
 
                 async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
+                    if await request.is_disconnected():
+                        raise asyncio.CancelledError("Download cancelled")
                     if not chunk:
                         continue
                     await asyncio.to_thread(_write_chunk, temp_file, chunk, "ab")
@@ -191,6 +205,14 @@ async def download_model(request):
                     )
 
         await asyncio.to_thread(os.replace, temp_file, dest_file)
+    except asyncio.CancelledError:
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+        try:
+            await response.write_eof()
+        except Exception:
+            pass
+        return response
     except Exception as exc:
         if os.path.exists(temp_file):
             os.remove(temp_file)
