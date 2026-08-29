@@ -139,6 +139,35 @@ async def save_settings(request):
     except json.JSONDecodeError:
         return web.json_response({"error": "Invalid JSON body"}, status=400)
 
+    # Load from pasted config or hosted URL (same route — no extra path needed).
+    if isinstance(body.get("config"), dict):
+        try:
+            apply_pulled_config(body["config"], (body.get("config_url") or "").strip())
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        payload = settings_payload()
+        payload.update({"ok": True, "saved": True, "loaded": True})
+        return web.json_response(payload)
+
+    load_only = bool(body.get("load") or body.get("pull"))
+    config_url = (body.get("config_url") or "").strip()
+    if load_only and config_url:
+        if config_url.startswith("{"):
+            return web.json_response(
+                {"error": "Paste JSON in the config box below, then Load"},
+                status=400,
+            )
+        if not config_url.startswith(("http://", "https://")):
+            return web.json_response({"error": "Config URL must be http(s)"}, status=400)
+        try:
+            remote = await fetch_remote_config(config_url)
+            apply_pulled_config(remote, config_url)
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        payload = settings_payload()
+        payload.update({"ok": True, "saved": True, "loaded": True})
+        return web.json_response(payload)
+
     config_url = (body.get("config_url") or "").strip()
     want_pull = bool(body.get("pull"))
     keys_blank = not (body.get("access_key_id") or "").strip() and not (

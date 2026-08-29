@@ -983,10 +983,10 @@ class TastyR2Modal {
           this.setError("Config JSON must be an object");
           return;
         }
-        body = { config, config_url };
+        body = { config, config_url, load: true };
         status.textContent = "Loading pasted config...";
       } else if (config_url) {
-        body = { config_url };
+        body = { config_url, load: true };
         status.textContent = "Loading config from URL...";
       } else {
         this.setError("Paste a config URL or config.json contents first");
@@ -994,7 +994,7 @@ class TastyR2Modal {
       }
 
       try {
-        const resp = await api.fetchApi("/tasty-r2/settings/pull", {
+        const resp = await api.fetchApi("/tasty-r2/settings", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
