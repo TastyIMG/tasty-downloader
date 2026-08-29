@@ -9,7 +9,7 @@ from server import PromptServer
 
 from .paths import CHUNK_SIZE, LOCAL_REGISTRY_PATH
 from .registry import find_entry, get_registry_path, load_registry
-from .streaming import prepare_ndjson
+from .streaming import client_disconnected, prepare_ndjson
 
 routes = PromptServer.instance.routes
 
@@ -109,7 +109,7 @@ async def download_model(request):
                 )
 
                 async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
-                    if await request.is_disconnected():
+                    if await client_disconnected(request):
                         raise asyncio.CancelledError("Download cancelled")
                     if not chunk:
                         continue
