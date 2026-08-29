@@ -15,6 +15,7 @@ from .rclone_ops import (
     ensure_rclone_remote,
     prefer_rclone_download,
     r2_model_object_key,
+    rclone_object_size,
     run_rclone_with_progress,
 )
 from .registry import find_entry, get_registry_path, load_registry
@@ -159,9 +160,20 @@ async def download_model(request):
                 }
             )
             remote = await asyncio.to_thread(ensure_rclone_remote, r2)
-            src = f"{remote}:{r2['bucket']}/{r2_model_object_key(save_path, filename)}"
+            object_key = r2_model_object_key(save_path, filename)
+            file_size = await asyncio.to_thread(rclone_object_size, r2, remote, object_key)
+            src = f"{remote}:{r2['bucket']}/{object_key}"
+            if file_size:
+                await send_event(
+                    {
+                        "type": "progress",
+                        "downloaded": 0,
+                        "total": file_size,
+                        "percent": 0,
+                    }
+                )
             cmd = build_rclone_s3_copyto_cmd(r2, src, temp_file, upload=False)
-            await run_rclone_with_progress(cmd, 0, request, send_event)
+            await run_rclone_with_progress(cmd, file_size, request, send_event)
         else:
             await download_via_http(url, temp_file, request, send_event)
 

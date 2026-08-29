@@ -3,10 +3,12 @@ import json
 import os
 import platform
 import re
+import select
 import shutil
 import stat
 import subprocess
 import threading
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -21,6 +23,7 @@ from .streaming import client_disconnected
 RCLONE_BIN_DIR = EXTENSION_DIR / "bin"
 RCLONE_VERSION = "v1.68.2"
 _install_lock = threading.Lock()
+PROGRESS_EMIT_INTERVAL_SEC = 0.25
 
 PERCENT_RE = re.compile(r",\s*(\d+(?:\.\d+)?)%")
 BYTES_RE = re.compile(
@@ -41,6 +44,98 @@ def run_cmd(cmd, timeout=60):
         timeout=timeout,
         check=False,
     )
+
+
+def upload_transfer_options(file_size: int, r2) -> tuple[str, int]:
+    """Conservative multipart settings for large R2 uploads (avoids size-mismatch failures)."""
+    chunk = str(r2.get("chunk_size") or "64M")
+    concurrency = int(r2.get("upload_concurrency") or 4)
+    if file_size >= 15 * 1024**3:
+        return "128M", min(concurrency, 2)
+    if file_size >= 5 * 1024**3:
+        return chunk, min(concurrency, 4)
+    return chunk, concurrency
+
+
+def delete_r2_object(r2, remote, object_key):
+    """Remove a stale/partial object before re-upload (best-effort; ignore missing)."""
+    rclone = rclone_bin()
+    key = object_key.replace("\\", "/").lstrip("/")
+    target = f"{remote}:{r2['bucket']}/{key}"
+    run_cmd([rclone, "deletefile", target, "--s3-no-check-bucket"], timeout=300)
+
+
+def rclone_object_size(r2, remote, object_key):
+    """Return remote object size in bytes, or 0 if unknown."""
+    rclone = rclone_bin()
+    key = object_key.replace("\\", "/").lstrip("/")
+    target = f"{remote}:{r2['bucket']}/{key}"
+    result = run_cmd(
+        [rclone, "lsjson", target, "--files-only", "--s3-no-check-bucket"],
+        timeout=120,
+    )
+    if result.returncode != 0:
+        return 0
+    try:
+        entries = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        return 0
+    if isinstance(entries, list) and entries:
+        return int(entries[0].get("Size") or 0)
+    return 0
+
+
+def line_buffered_cmd(cmd):
+    """Line-buffer rclone stdout on Linux so --stats lines flush during pipe I/O."""
+    if platform.system().lower() == "linux" and shutil.which("stdbuf"):
+        return ["stdbuf", "-oL", *cmd]
+    return cmd
+
+
+def _read_pty_chunk(master_fd, proc):
+    if proc.returncode is not None:
+        ready, _, _ = select.select([master_fd], [], [], 0)
+        if not ready:
+            return None
+    ready, _, _ = select.select([master_fd], [], [], 1.0)
+    if not ready:
+        return b""
+    try:
+        data = os.read(master_fd, 4096)
+    except OSError:
+        return None
+    if not data:
+        return None
+    return data
+
+
+def format_rclone_failure(log_tail):
+    messages = []
+    for line in log_tail:
+        if line.startswith("{"):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict):
+                level = str(payload.get("level") or "").lower()
+                msg = (payload.get("msg") or "").strip()
+                if msg and level in ("error", "notice") and "failed" in msg.lower():
+                    messages.append(msg)
+                    continue
+                if msg and level == "error":
+                    messages.append(msg)
+                    continue
+        lower = line.lower()
+        if any(
+            needle in lower
+            for needle in ("error", "failed", "denied", "forbidden", "404", "403", "401", "corrupted")
+        ):
+            messages.append(line.strip())
+    if messages:
+        return " | ".join(messages[-3:])
+    tail = [line.strip() for line in log_tail if line.strip()]
+    return " | ".join(tail[-3:] or ["(no rclone output)"])
 
 
 def _rclone_exe_name():
@@ -364,120 +459,161 @@ def prefer_rclone_download(r2, url: str) -> bool:
     return False
 
 
-def build_rclone_s3_copyto_cmd(r2, src, dest, *, upload=False):
+def build_rclone_s3_copyto_cmd(r2, src, dest, *, upload=False, file_size=0):
     rclone = rclone_bin()
+    chunk_size = str(r2.get("chunk_size") or "64M")
+    upload_concurrency = int(r2.get("upload_concurrency") or 4)
+    if upload and file_size > 0:
+        chunk_size, upload_concurrency = upload_transfer_options(file_size, r2)
+
     cmd = [
         rclone,
         "copyto",
         src,
         dest,
         "-v",
-        "--use-json-log",
         "--s3-no-check-bucket",
         "--s3-chunk-size",
-        str(r2.get("chunk_size") or "64M"),
-        "--progress",
+        chunk_size,
         "--stats",
         "1s",
         "--stats-one-line",
+        "--timeout",
+        "0",
     ]
     if upload:
         cmd.extend(
             [
                 "--s3-upload-concurrency",
-                str(r2.get("upload_concurrency") or 8),
+                str(upload_concurrency),
+                "--retries",
+                "3",
+                "--low-level-retries",
+                "10",
             ]
         )
     return cmd
 
 
 async def run_rclone_with_progress(cmd, fallback_total, request, send_event):
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
+    cmd = line_buffered_cmd(list(cmd))
+    use_pty = platform.system().lower() != "windows" and hasattr(os, "openpty")
 
-    assert proc.stdout is not None
+    master_fd = None
+    proc = None
     buffer = ""
     last_downloaded = 0
+    last_emit_at = 0.0
     log_tail = []
 
-    def remember(line: str):
-        log_tail.append(line)
-        if len(log_tail) > 40:
-            del log_tail[:-40]
+    async def emit_progress(downloaded, total, percent, *, force=False):
+        nonlocal last_emit_at
+        now = time.monotonic()
+        if not force and (now - last_emit_at) < PROGRESS_EMIT_INTERVAL_SEC:
+            return
+        last_emit_at = now
+        await send_event(
+            {
+                "type": "progress",
+                "downloaded": downloaded,
+                "total": total,
+                "percent": percent,
+            }
+        )
+
+    async def handle_lines(lines):
+        nonlocal last_downloaded
+        for text in lines:
+            log_tail.append(text)
+            if len(log_tail) > 40:
+                del log_tail[:-40]
+            downloaded, total, percent = parse_rclone_progress(text, fallback_total)
+            if downloaded is None and percent is None:
+                continue
+            if downloaded is None:
+                downloaded = last_downloaded
+            else:
+                last_downloaded = downloaded
+            total = total if total else fallback_total
+            if percent is None and total:
+                percent = round(downloaded * 100 / total)
+            await emit_progress(downloaded, total, percent)
+
+    async def drain_buffer(*, final=False):
+        nonlocal buffer
+        lines, buffer = split_rclone_output(buffer)
+        if lines:
+            await handle_lines(lines)
+        if final and buffer.strip():
+            await handle_lines([buffer.strip()])
+            buffer = ""
 
     try:
-        while True:
-            if await client_disconnected(request):
-                raise asyncio.CancelledError("Transfer cancelled")
+        if use_pty:
+            master_fd, slave_fd = os.openpty()
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                close_fds=True,
+            )
+            os.close(slave_fd)
+            loop = asyncio.get_running_loop()
+            while True:
+                if await client_disconnected(request):
+                    raise asyncio.CancelledError("Transfer cancelled")
+                chunk = await loop.run_in_executor(None, _read_pty_chunk, master_fd, proc)
+                if chunk is None:
+                    break
+                if chunk:
+                    buffer += chunk.decode("utf-8", errors="replace")
+                    await drain_buffer()
+        else:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            assert proc.stdout is not None
+            while True:
+                if await client_disconnected(request):
+                    raise asyncio.CancelledError("Transfer cancelled")
+                chunk = await proc.stdout.read(4096)
+                if not chunk:
+                    break
+                buffer += chunk.decode("utf-8", errors="replace")
+                await drain_buffer()
 
-            chunk = await proc.stdout.read(4096)
-            if not chunk:
-                break
-
-            buffer += chunk.decode("utf-8", errors="replace")
-            lines, buffer = split_rclone_output(buffer)
-
-            for text in lines:
-                remember(text)
-                downloaded, total, percent = parse_rclone_progress(text, fallback_total)
-                if downloaded is None and percent is None:
-                    continue
-                if downloaded is None:
-                    downloaded = last_downloaded
-                else:
-                    last_downloaded = downloaded
-                total = total if total else fallback_total
-                if percent is None and total:
-                    percent = round(downloaded * 100 / total)
-                await send_event(
-                    {
-                        "type": "progress",
-                        "downloaded": downloaded,
-                        "total": total,
-                        "percent": percent,
-                    }
-                )
-
-        if buffer.strip():
-            remember(buffer.strip())
-            downloaded, total, percent = parse_rclone_progress(buffer, fallback_total)
-            if downloaded is not None or percent is not None:
-                if downloaded is None:
-                    downloaded = last_downloaded
-                total = total if total else fallback_total
-                if percent is None and total:
-                    percent = round(downloaded * 100 / total)
-                await send_event(
-                    {
-                        "type": "progress",
-                        "downloaded": downloaded,
-                        "total": total,
-                        "percent": percent,
-                    }
-                )
+        await drain_buffer(final=True)
 
         code = await proc.wait()
         if code != 0:
-            interesting = [
-                line
-                for line in log_tail
-                if any(
-                    needle in line.lower()
-                    for needle in ("error", "failed", "denied", "forbidden", "404", "403", "401")
+            detail = format_rclone_failure(log_tail)
+            hint = ""
+            if "sizes differ" in detail.lower():
+                hint = (
+                    " A partial/corrupt copy may remain on R2 — retry Push "
+                    "(the node deletes the old object first). For 15GB+ files, "
+                    "use upload_concurrency 2 in Settings if it fails again."
                 )
-            ]
-            detail = " | ".join(interesting[-5:] or log_tail[-5:] or ["(no rclone output)"])
-            raise RuntimeError(f"rclone exited with code {code}: {detail}")
+            raise RuntimeError(f"rclone exited with code {code}: {detail}{hint}")
+
+        if fallback_total and last_downloaded < fallback_total:
+            await emit_progress(fallback_total, fallback_total, 100, force=True)
 
         return last_downloaded or fallback_total or 0
     except asyncio.CancelledError:
-        if proc.returncode is None:
+        if proc and proc.returncode is None:
             proc.terminate()
             try:
                 await proc.wait()
             except Exception:
                 pass
         raise
+    finally:
+        if master_fd is not None:
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass

@@ -10,6 +10,7 @@ from server import PromptServer
 from .config_store import get_r2_config, r2_is_configured
 from .rclone_ops import (
     build_rclone_s3_copyto_cmd,
+    delete_r2_object,
     ensure_rclone_remote,
     rclone_available,
     registry_key,
@@ -86,8 +87,12 @@ async def push_model(request):
         )
 
         remote = await asyncio.to_thread(ensure_rclone_remote, r2)
-        dest = f"{remote}:{r2['bucket']}/models/{save_path}/{filename}"
-        cmd = build_rclone_s3_copyto_cmd(r2, src, dest, upload=True)
+        object_key = f"models/{save_path}/{filename}"
+        dest = f"{remote}:{r2['bucket']}/{object_key}"
+        await asyncio.to_thread(delete_r2_object, r2, remote, object_key)
+        cmd = build_rclone_s3_copyto_cmd(
+            r2, src, dest, upload=True, file_size=file_size
+        )
         await run_rclone_with_progress(cmd, file_size, request, send_event)
 
         entry = {

@@ -18,7 +18,7 @@
     "public_base_url": "https://pub-xxxx.r2.dev",
     "remote_name": "tasty-r2",
     "chunk_size": "64M",
-    "upload_concurrency": 8,
+    "upload_concurrency": 4,
     "push_folders": [
       "diffusion_models",
       "unet",
