@@ -1,0 +1,20 @@
+[
+  {
+    "for_model": "Flux 1 Dev",
+    "filename": "flux1-dev-fp8.safetensors",
+    "save_path": "checkpoints",
+    "url": "https://pub-xxxx.r2.dev/models/checkpoints/flux1-dev-fp8.safetensors"
+  },
+  {
+    "for_model": "Flux 1 Dev",
+    "filename": "ae.safetensors",
+    "save_path": "vae",
+    "url": "https://pub-xxxx.r2.dev/models/vae/ae.safetensors"
+  },
+  {
+    "for_model": "Flux 1 Dev",
+    "filename": "example_lora.safetensors",
+    "save_path": "loras",
+    "url": "https://pub-xxxx.r2.dev/models/loras/example_lora.safetensors"
+  }
+]
