@@ -149,6 +149,15 @@ async def download_model(request):
         await send_event({"type": "progress", "downloaded": 0, "total": 0, "percent": 0})
 
         if use_rclone:
+            await send_event(
+                {
+                    "type": "progress",
+                    "downloaded": 0,
+                    "total": 0,
+                    "percent": 0,
+                    "status": "Preparing rclone…",
+                }
+            )
             remote = await asyncio.to_thread(ensure_rclone_remote, r2)
             src = f"{remote}:{r2['bucket']}/{r2_model_object_key(save_path, filename)}"
             cmd = build_rclone_s3_copyto_cmd(r2, src, temp_file, upload=False)

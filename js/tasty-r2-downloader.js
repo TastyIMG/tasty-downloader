@@ -663,6 +663,12 @@ class TastyR2Modal {
       ? Math.max(0, Math.min(100, Number(event.percent)))
       : (total ? Math.min(100, Math.round((downloaded * 100) / total)) : null);
 
+    if (event.status && !downloaded && (percent == null || percent === 0)) {
+      progressEl.fill.style.width = "0%";
+      progressEl.label.textContent = event.status;
+      return;
+    }
+
     if (percent != null) {
       progressEl.fill.style.width = `${percent}%`;
       progressEl.label.textContent = total
@@ -672,7 +678,7 @@ class TastyR2Modal {
     }
 
     progressEl.fill.style.width = "100%";
-    progressEl.label.textContent = downloaded ? formatBytes(downloaded) : "Uploading...";
+    progressEl.label.textContent = downloaded ? formatBytes(downloaded) : "Transferring…";
   }
 
   parseStreamEvent(line) {
