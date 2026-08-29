@@ -29,7 +29,7 @@ DEFAULT_R2 = {
     "bucket": "",
     "endpoint": "",
     "public_base_url": "",
-    "registry_url": "",
+    "config_url": "",
     "remote_name": "tasty-r2",
     "chunk_size": "64M",
     "upload_concurrency": 8,

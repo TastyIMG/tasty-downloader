@@ -207,7 +207,7 @@ async def push_model(request):
             await send_event(
                 {
                     "type": "error",
-                    "error": f"Uploaded to R2 but failed to append registry.local.json: {exc}",
+                    "error": f"Uploaded to R2 but failed to append config.json models: {exc}",
                 }
             )
             await response.write_eof()

@@ -885,7 +885,7 @@ class TastyR2Modal {
           <label>Bucket</label>
           <input name="bucket" value="${this.escapeAttr(data.bucket || "")}" />
         </div>
-        <div class="tasty-r2-field">
+        <div class="tasty-r2-field" hidden>
           <label>Endpoint (optional — built from account id if empty)</label>
           <input name="endpoint" value="${this.escapeAttr(data.endpoint || "")}" placeholder="https://ACCOUNT_ID.r2.cloudflarestorage.com" />
         </div>
@@ -894,15 +894,15 @@ class TastyR2Modal {
           <input name="public_base_url" value="${this.escapeAttr(data.public_base_url || "")}" placeholder="https://pub-….r2.dev" />
         </div>
         <div class="tasty-r2-field">
-          <label>Registry URL</label>
-          <input name="registry_url" value="${this.escapeAttr(data.registry_url || "")}" placeholder="https://pub-….r2.dev/path/registry.local.json" />
-          <div class="tasty-r2-hint">Hosted <code>registry.local.json</code> — use with the sync one-liner to replace the local file on a new box.</div>
+          <label>Config URL</label>
+          <input name="config_url" value="${this.escapeAttr(data.config_url || "")}" placeholder="https://pub-….r2.dev/path/config.json" />
+          <div class="tasty-r2-hint">One hosted <code>config.json</code> — credentials, settings, and personal models. Sync that single file on a new box.</div>
         </div>
-        <div class="tasty-r2-field">
+        <div class="tasty-r2-field" hidden>
           <label>Push folders (comma-separated)</label>
           <textarea name="push_folders">${this.escapeText(folders)}</textarea>
         </div>
-        <div class="tasty-r2-field">
+        <div class="tasty-r2-field" hidden>
           <label>Chunk size</label>
           <input name="chunk_size" value="${this.escapeAttr(data.chunk_size || "64M")}" />
         </div>
@@ -929,7 +929,7 @@ class TastyR2Modal {
         bucket: fd.get("bucket") || "",
         endpoint: fd.get("endpoint") || "",
         public_base_url: fd.get("public_base_url") || "",
-        registry_url: fd.get("registry_url") || "",
+        config_url: fd.get("config_url") || "",
         chunk_size: fd.get("chunk_size") || "64M",
         push_folders: fd.get("push_folders") || "",
         test,
