@@ -24,6 +24,7 @@ async def get_settings(_request):
             "bucket": r2.get("bucket") or "",
             "endpoint": r2.get("endpoint") or "",
             "public_base_url": r2.get("public_base_url") or "",
+            "registry_url": r2.get("registry_url") or "",
             "remote_name": r2.get("remote_name") or "tasty-r2",
             "chunk_size": r2.get("chunk_size") or "64M",
             "upload_concurrency": r2.get("upload_concurrency") or 8,
@@ -52,6 +53,7 @@ async def save_settings(request):
         "bucket",
         "endpoint",
         "public_base_url",
+        "registry_url",
         "remote_name",
         "chunk_size",
     ):
