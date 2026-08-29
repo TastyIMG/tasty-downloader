@@ -49,21 +49,27 @@ async def fetch_remote_config(url):
                 data = await resp.json(content_type=None)
             except Exception as exc:
                 raise RuntimeError(f"Config URL did not return JSON: {exc}") from exc
-    if not isinstance(data, dict):
-        raise RuntimeError("Config URL must point to a JSON object")
-    if "r2" in data and not isinstance(data.get("r2"), dict):
+    return normalize_remote_config(data)
+
+
+def normalize_remote_config(remote):
+    if not isinstance(remote, dict):
+        raise RuntimeError("Config must be a JSON object")
+    if "r2" in remote and not isinstance(remote.get("r2"), dict):
         raise RuntimeError("Config JSON r2 must be an object")
-    return data
+    return remote
 
 
-def apply_pulled_config(remote, config_url):
-    """Write remote config locally; always keep the Config URL that was pulled."""
+def apply_pulled_config(remote, config_url=""):
+    """Write remote config locally; keep Config URL when pulling from a hosted file."""
+    remote = normalize_remote_config(remote)
     cfg = {
         "registry_path": (remote.get("registry_path") or "").strip(),
         "models": remote.get("models") if isinstance(remote.get("models"), list) else [],
         "r2": {**DEFAULT_R2, **(remote.get("r2") or {})},
     }
-    cfg["r2"]["config_url"] = config_url
+    if config_url:
+        cfg["r2"]["config_url"] = config_url
     pub = (cfg["r2"].get("public_base_url") or "").rstrip("/")
     if pub:
         cfg["r2"]["public_base_url"] = pub
@@ -85,14 +91,30 @@ async def pull_settings(request):
     try:
         body = await request.json()
     except json.JSONDecodeError:
-        body = {}
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    pasted = body.get("config")
+    if isinstance(pasted, dict):
+        try:
+            apply_pulled_config(pasted, (body.get("config_url") or "").strip())
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        payload = settings_payload()
+        payload["ok"] = True
+        payload["pulled"] = True
+        return web.json_response(payload)
 
     url = (body.get("config_url") or "").strip()
     if not url:
         url = (get_r2_config().get("config_url") or "").strip()
     if not url:
         return web.json_response(
-            {"error": "Set Config URL first (hosted config.json)"},
+            {"error": "Paste a config URL or paste config.json contents"},
+            status=400,
+        )
+    if url.startswith("{"):
+        return web.json_response(
+            {"error": "That looks like JSON — click Load after pasting, not Save"},
             status=400,
         )
     if not url.startswith(("http://", "https://")):

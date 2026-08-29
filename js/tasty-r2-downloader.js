@@ -291,6 +291,12 @@ const styles = `
   flex-shrink: 0;
   padding: 6px 12px;
 }
+.tasty-r2-config-paste {
+  min-height: 120px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+}
 .tasty-r2-hint {
   font-size: 11px;
   color: #888;
@@ -887,7 +893,7 @@ class TastyR2Modal {
     this.body.innerHTML = `
       <form class="tasty-r2-settings">
         <div class="tasty-r2-hint">
-          Paste your hosted <code>config.json</code> URL and hit <strong>Load</strong> — credentials and models fill in automatically.
+          Paste your hosted URL <em>or</em> the full <code>config.json</code> contents, then hit <strong>Load</strong>.
           ${data.rclone_available ? "" : "<br><strong>rclone is not installed.</strong>"}
         </div>
         <div class="tasty-r2-field">
@@ -896,6 +902,10 @@ class TastyR2Modal {
             <input name="config_url" value="${this.escapeAttr(data.config_url || "")}" placeholder="https://pub-….r2.dev/path/config.json" />
             <button class="tasty-r2-btn" type="button" data-action="pull">Load</button>
           </div>
+        </div>
+        <div class="tasty-r2-field">
+          <label>Or paste config.json</label>
+          <textarea name="config_paste" class="tasty-r2-config-paste" placeholder='{"registry_path":"","models":[],"r2":{...}}'></textarea>
           ${modelsNote}
         </div>
         <div class="tasty-r2-field">
@@ -943,24 +953,55 @@ class TastyR2Modal {
     const testBtn = this.body.querySelector('[data-action="test"]');
     const pullBtn = this.body.querySelector('[data-action="pull"]');
     const configUrlInput = form.querySelector('[name="config_url"]');
+    const configPasteInput = form.querySelector('[name="config_paste"]');
 
-    const pullFromUrl = async () => {
+    const readJsonResponse = async (resp) => {
+      const text = await resp.text();
+      if (!text.trim()) return {};
+      try {
+        return JSON.parse(text);
+      } catch {
+        throw new Error(text.slice(0, 200) || "Server returned non-JSON response");
+      }
+    };
+
+    const loadConfig = async () => {
       this.setError("");
+      const pasted = (configPasteInput?.value || "").trim();
       const config_url = (configUrlInput.value || "").trim();
-      if (!config_url) {
-        this.setError("Paste a Config URL first");
+      let body;
+
+      if (pasted) {
+        let config;
+        try {
+          config = JSON.parse(pasted);
+        } catch (err) {
+          this.setError(`Invalid config JSON: ${err.message || err}`);
+          return;
+        }
+        if (!config || typeof config !== "object" || Array.isArray(config)) {
+          this.setError("Config JSON must be an object");
+          return;
+        }
+        body = { config, config_url };
+        status.textContent = "Loading pasted config...";
+      } else if (config_url) {
+        body = { config_url };
+        status.textContent = "Loading config from URL...";
+      } else {
+        this.setError("Paste a config URL or config.json contents first");
         return;
       }
-      status.textContent = "Loading config from URL...";
+
       try {
         const resp = await api.fetchApi("/tasty-r2/settings/pull", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ config_url }),
+          body: JSON.stringify(body),
         });
-        const data = await resp.json();
+        const data = await readJsonResponse(resp);
         if (!resp.ok || data.ok === false) {
-          throw new Error(data.error || "Pull failed");
+          throw new Error(data.error || "Load failed");
         }
         this.renderSettings(data);
         const st = this.body.querySelector("[data-status]");
@@ -995,7 +1036,7 @@ class TastyR2Modal {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
-        const data = await resp.json();
+        const data = await readJsonResponse(resp);
         if (!resp.ok || data.ok === false) {
           throw new Error(data.error || "Save failed");
         }
@@ -1015,10 +1056,7 @@ class TastyR2Modal {
       submit(false);
     };
     testBtn.onclick = () => submit(true);
-    pullBtn.onclick = () => pullFromUrl();
-    configUrlInput.addEventListener("change", () => {
-      if ((configUrlInput.value || "").trim()) pullFromUrl();
-    });
+    pullBtn.onclick = () => loadConfig();
   }
 
   escapeAttr(value) {
