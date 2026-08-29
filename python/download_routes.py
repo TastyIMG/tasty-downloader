@@ -7,6 +7,7 @@ import folder_paths
 from aiohttp import web
 from server import PromptServer
 
+from .config_store import load_config
 from .paths import CHUNK_SIZE, LOCAL_REGISTRY_PATH
 from .registry import find_entry, get_registry_path, load_registry
 from .streaming import client_disconnected, prepare_ndjson
@@ -19,12 +20,18 @@ def write_chunk(path, data, mode="ab"):
         out.write(data)
 
 
+def registry_available():
+    if get_registry_path().exists() or LOCAL_REGISTRY_PATH.exists():
+        return True
+    models = load_config().get("models") or []
+    return isinstance(models, list) and len(models) > 0
+
+
 @routes.get("/tasty-r2/list")
 async def list_models(_request):
-    registry_path = get_registry_path()
-    if not registry_path.exists() and not LOCAL_REGISTRY_PATH.exists():
+    if not registry_available():
         return web.json_response(
-            {"error": f"Registry not found: {registry_path}"},
+            {"error": "No models in config.json or registry.json"},
             status=404,
         )
 
@@ -60,10 +67,9 @@ async def download_model(request):
     if not filename:
         return web.json_response({"error": "filename required"}, status=400)
 
-    registry_path = get_registry_path()
-    if not registry_path.exists() and not LOCAL_REGISTRY_PATH.exists():
+    if not registry_available():
         return web.json_response(
-            {"error": f"Registry not found: {registry_path}"},
+            {"error": "No models in config.json or registry.json"},
             status=404,
         )
 
