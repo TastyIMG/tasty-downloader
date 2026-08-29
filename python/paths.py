@@ -26,7 +26,7 @@ DEFAULT_R2 = {
     "account_id": "",
     "access_key_id": "",
     "secret_access_key": "",
-    "bucket": "vastaiconfig",
+    "bucket": "",
     "endpoint": "",
     "public_base_url": "",
     "remote_name": "tasty-r2",

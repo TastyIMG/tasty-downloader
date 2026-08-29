@@ -16,7 +16,7 @@ from .rclone_ops import (
     scan_push_candidates,
 )
 from .registry import append_local_registry, registry_filenames
-from .streaming import prepare_ndjson
+from .streaming import client_disconnected, prepare_ndjson
 
 routes = PromptServer.instance.routes
 
@@ -101,7 +101,7 @@ async def push_model(request):
 
         assert proc.stdout is not None
         while True:
-            if await request.is_disconnected():
+            if await client_disconnected(request):
                 proc.terminate()
                 raise asyncio.CancelledError("Push cancelled")
 
