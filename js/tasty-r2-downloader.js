@@ -172,17 +172,7 @@ const styles = `
   border-color: #4a7;
   color: #cfc;
 }
-.tasty-r2-btn.push {
-  background: #2a3a55;
-  border-color: #4a6a9a;
-  color: #cde;
-}
-.tasty-r2-btn.push:hover:not(:disabled) {
-  background: #334866;
-}
 .tasty-r2-btn.push.done {
-  opacity: 1;
-  cursor: default;
   background: #243a5c;
   border-color: #4a8adf;
   color: #bcdcff;
@@ -492,12 +482,15 @@ class TastyR2Modal {
         return;
       }
 
-      const items = (data.items || []).filter((item) => !this.pushed.has(item.filename));
+      const items = data.items || [];
+      for (const item of items) {
+        if (item.registered) this.pushed.add(item.filename);
+      }
       this.renderGrouped(
         items,
         "push",
         (item) => this.renderPushRow(item),
-        "No unregistered local models to push",
+        "No local models found in configured push folders",
       );
     } catch (err) {
       this.body.innerHTML = `<div class="tasty-r2-empty">Failed to load push list</div>`;
@@ -594,13 +587,13 @@ class TastyR2Modal {
 
   createPushButton(item) {
     const btn = document.createElement("button");
-    btn.className = "tasty-r2-btn push";
+    btn.className = "tasty-r2-btn";
     btn.type = "button";
     const key = `${item.save_path}/${item.filename}`;
 
-    if (this.pushed.has(item.filename)) {
+    if (this.pushed.has(item.filename) || item.registered) {
       btn.textContent = "Pushed";
-      btn.classList.add("done");
+      btn.classList.add("push", "done");
       btn.disabled = true;
       return btn;
     }
