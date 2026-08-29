@@ -328,6 +328,8 @@ class TastyR2Modal {
     this.pushing = new Set();
     this.pushed = new Set();
     this.abortControllers = new Map();
+    // Live transfer UI state — survives panel close; only Cancel aborts.
+    this.transferUi = new Map();
     this.openSections = {
       download: new Set(),
       push: new Set(),
@@ -376,10 +378,10 @@ class TastyR2Modal {
   }
 
   close() {
-    for (const controller of this.abortControllers.values()) {
-      controller.abort();
+    // Closing the panel must NOT cancel transfers — only the Cancel button does.
+    for (const state of this.transferUi.values()) {
+      state.progressEl = null;
     }
-    this.abortControllers.clear();
     if (this.overlay) {
       this.overlay.remove();
       this.overlay = null;
@@ -556,7 +558,12 @@ class TastyR2Modal {
 
     const action = document.createElement("div");
     action.className = "tasty-r2-action";
-    action.appendChild(this.createDownloadButton(item.filename));
+    const transferKey = `dl:${item.filename}`;
+    if (this.downloading.has(item.filename) && this.transferUi.has(transferKey)) {
+      this.reattachTransferProgress(transferKey, action);
+    } else {
+      action.appendChild(this.createDownloadButton(item.filename));
+    }
     row.append(info, action);
     return row;
   }
@@ -583,7 +590,12 @@ class TastyR2Modal {
 
     const action = document.createElement("div");
     action.className = "tasty-r2-action";
-    action.appendChild(this.createPushButton(item));
+    const transferKey = `push:${item.save_path}/${item.filename}`;
+    if (this.pushing.has(`${item.save_path}/${item.filename}`) && this.transferUi.has(transferKey)) {
+      this.reattachTransferProgress(transferKey, action);
+    } else {
+      action.appendChild(this.createPushButton(item));
+    }
     row.append(info, action);
     return row;
   }
@@ -652,7 +664,26 @@ class TastyR2Modal {
       fill: actionEl.querySelector(".tasty-r2-progress-fill"),
       label: actionEl.querySelector(".tasty-r2-progress-label"),
       cancelBtn,
+      actionEl,
     };
+  }
+
+  reattachTransferProgress(transferKey, actionEl) {
+    const state = this.transferUi.get(transferKey);
+    if (!state) return null;
+    const progressEl = this.createProgress(
+      actionEl,
+      () => {
+        state.abortController.abort();
+        if (state.progressEl?.label) state.progressEl.label.textContent = "Cancelling...";
+        if (state.progressEl?.cancelBtn) state.progressEl.cancelBtn.disabled = true;
+      },
+      { push: state.push },
+    );
+    state.progressEl = progressEl;
+    if (state.lastEvent) this.updateProgress(progressEl, state.lastEvent);
+    else if (progressEl.label) progressEl.label.textContent = "Transferring…";
+    return progressEl;
   }
 
   updateProgress(progressEl, event) {
@@ -686,15 +717,18 @@ class TastyR2Modal {
     }
   }
 
-  handleStreamEvent(event, progressEl) {
+  handleStreamEvent(event, transferKey) {
     if (!event) return false;
+    const state = this.transferUi.get(transferKey);
     if (event.type === "progress") {
-      this.updateProgress(progressEl, event);
+      if (state) state.lastEvent = event;
+      this.updateProgress(state?.progressEl, event);
       return false;
     }
     if (event.type === "done") {
-      if (progressEl?.fill) progressEl.fill.style.width = "100%";
-      if (progressEl?.label) progressEl.label.textContent = "Done";
+      if (state) state.lastEvent = { type: "progress", downloaded: 1, total: 1, percent: 100 };
+      if (state?.progressEl?.fill) state.progressEl.fill.style.width = "100%";
+      if (state?.progressEl?.label) state.progressEl.label.textContent = "Done";
       return true;
     }
     if (event.type === "error") {
@@ -703,7 +737,7 @@ class TastyR2Modal {
     return false;
   }
 
-  async consumeNdjson(resp, progressEl, abortController) {
+  async consumeNdjson(resp, transferKey, abortController) {
     if (!resp.body) throw new Error("Empty response");
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
@@ -724,7 +758,7 @@ class TastyR2Modal {
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
         for (const line of lines) {
-          if (this.handleStreamEvent(this.parseStreamEvent(line), progressEl)) {
+          if (this.handleStreamEvent(this.parseStreamEvent(line), transferKey)) {
             doneReceived = true;
           }
         }
@@ -739,7 +773,7 @@ class TastyR2Modal {
     if (!cancelled) {
       buffer += decoder.decode();
       for (const line of buffer.split("\n")) {
-        if (this.handleStreamEvent(this.parseStreamEvent(line), progressEl)) {
+        if (this.handleStreamEvent(this.parseStreamEvent(line), transferKey)) {
           doneReceived = true;
         }
       }
@@ -752,14 +786,23 @@ class TastyR2Modal {
     if (this.downloading.has(filename)) return;
     this.downloading.add(filename);
 
+    const transferKey = `dl:${filename}`;
     const abortController = new AbortController();
-    this.abortControllers.set(`dl:${filename}`, abortController);
+    this.abortControllers.set(transferKey, abortController);
+    this.transferUi.set(transferKey, {
+      abortController,
+      progressEl: null,
+      lastEvent: null,
+      push: false,
+    });
 
     const progressEl = this.createProgress(actionEl, () => {
       abortController.abort();
-      if (progressEl.label) progressEl.label.textContent = "Cancelling...";
-      if (progressEl.cancelBtn) progressEl.cancelBtn.disabled = true;
+      const state = this.transferUi.get(transferKey);
+      if (state?.progressEl?.label) state.progressEl.label.textContent = "Cancelling...";
+      if (state?.progressEl?.cancelBtn) state.progressEl.cancelBtn.disabled = true;
     });
+    this.transferUi.get(transferKey).progressEl = progressEl;
     this.setError("");
 
     let succeeded = false;
@@ -784,7 +827,7 @@ class TastyR2Modal {
         throw new Error(message);
       }
 
-      const result = await this.consumeNdjson(resp, progressEl, abortController);
+      const result = await this.consumeNdjson(resp, transferKey, abortController);
       cancelled = result.cancelled;
       if (!cancelled) {
         if (!result.doneReceived) throw new Error("Download ended unexpectedly");
@@ -799,15 +842,18 @@ class TastyR2Modal {
       }
     } finally {
       this.downloading.delete(filename);
-      this.abortControllers.delete(`dl:${filename}`);
+      this.abortControllers.delete(transferKey);
+      const state = this.transferUi.get(transferKey);
+      const liveAction = state?.progressEl?.actionEl;
       if (succeeded) await new Promise((r) => setTimeout(r, 800));
-      else if (cancelled && progressEl.label) {
-        progressEl.label.textContent = "Cancelled";
+      else if (cancelled && state?.progressEl?.label) {
+        state.progressEl.label.textContent = "Cancelled";
         await new Promise((r) => setTimeout(r, 500));
       }
-      if (actionEl?.isConnected) {
-        actionEl.innerHTML = "";
-        actionEl.appendChild(this.createDownloadButton(filename));
+      this.transferUi.delete(transferKey);
+      if (liveAction?.isConnected) {
+        liveAction.innerHTML = "";
+        liveAction.appendChild(this.createDownloadButton(filename));
       }
     }
   }
@@ -817,14 +863,23 @@ class TastyR2Modal {
     if (this.pushing.has(key)) return;
     this.pushing.add(key);
 
+    const transferKey = `push:${key}`;
     const abortController = new AbortController();
-    this.abortControllers.set(`push:${key}`, abortController);
+    this.abortControllers.set(transferKey, abortController);
+    this.transferUi.set(transferKey, {
+      abortController,
+      progressEl: null,
+      lastEvent: null,
+      push: true,
+    });
 
     const progressEl = this.createProgress(actionEl, () => {
       abortController.abort();
-      if (progressEl.label) progressEl.label.textContent = "Cancelling...";
-      if (progressEl.cancelBtn) progressEl.cancelBtn.disabled = true;
+      const state = this.transferUi.get(transferKey);
+      if (state?.progressEl?.label) state.progressEl.label.textContent = "Cancelling...";
+      if (state?.progressEl?.cancelBtn) state.progressEl.cancelBtn.disabled = true;
     }, { push: true });
+    this.transferUi.get(transferKey).progressEl = progressEl;
     this.setError("");
 
     let succeeded = false;
@@ -849,7 +904,7 @@ class TastyR2Modal {
         throw new Error(message);
       }
 
-      const result = await this.consumeNdjson(resp, progressEl, abortController);
+      const result = await this.consumeNdjson(resp, transferKey, abortController);
       cancelled = result.cancelled;
       if (!cancelled) {
         if (!result.doneReceived) throw new Error("Push ended unexpectedly");
@@ -864,24 +919,20 @@ class TastyR2Modal {
       }
     } finally {
       this.pushing.delete(key);
-      this.abortControllers.delete(`push:${key}`);
+      this.abortControllers.delete(transferKey);
+      const state = this.transferUi.get(transferKey);
+      const liveAction = state?.progressEl?.actionEl;
       if (succeeded) {
-        if (progressEl.label) progressEl.label.textContent = "Pushed";
+        if (state?.progressEl?.label) state.progressEl.label.textContent = "Pushed";
         await new Promise((r) => setTimeout(r, 800));
-        if (actionEl?.isConnected) {
-          actionEl.innerHTML = "";
-          actionEl.appendChild(this.createPushButton(item));
-        }
-      } else if (cancelled && progressEl.label) {
-        progressEl.label.textContent = "Cancelled";
+      } else if (cancelled && state?.progressEl?.label) {
+        state.progressEl.label.textContent = "Cancelled";
         await new Promise((r) => setTimeout(r, 500));
-        if (actionEl?.isConnected) {
-          actionEl.innerHTML = "";
-          actionEl.appendChild(this.createPushButton(item));
-        }
-      } else if (actionEl?.isConnected) {
-        actionEl.innerHTML = "";
-        actionEl.appendChild(this.createPushButton(item));
+      }
+      this.transferUi.delete(transferKey);
+      if (liveAction?.isConnected) {
+        liveAction.innerHTML = "";
+        liveAction.appendChild(this.createPushButton(item));
       }
     }
   }

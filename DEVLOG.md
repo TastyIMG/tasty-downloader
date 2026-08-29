@@ -10,7 +10,7 @@ Everything that broke or shipped wrong in this project. **Append new rows; do no
 |---|---|---|
 | Download never started | Used broken `api.apiURL()` instead of `api.fetchApi` (same as list endpoint) | All Comfy API calls: `api.fetchApi("/tasty-r2/...")` |
 | `Unexpected non-whitespace character after JSON at position N (line 2 column 1)` on download | OK responses treated as single JSON via `resp.json()`; body is **NDJSON** (many lines) | Success path: stream line-by-line only; `resp.json()` only for `!resp.ok` errors |
-| Progress bar wiped instantly | `finally` restored button before user saw completion | Brief delay before restore; keep progress visible until done/cancel |
+| Closing panel cancelled downloads | `close()` aborted every `AbortController` | Only **Cancel** aborts; close clears DOM refs; reopen reattaches live progress |
 | No cancel on download | Shipped streaming download without abort | `AbortController` + Cancel button; server drops write on disconnect |
 | Server disconnect detection | Assumed `request.is_disconnected()` exists on Comfy’s aiohttp | Use helper in `streaming.py` that works with Comfy’s stack |
 | ~1 MB/s R2 downloads | Download used aiohttp via public URL; opened file every 1 MiB chunk; progress `drain()` every chunk | R2 models: `rclone copyto` from `{bucket}/models/...` (mirror Push). External URLs (HF, etc.): HTTP with 4 MiB chunks + throttled progress |

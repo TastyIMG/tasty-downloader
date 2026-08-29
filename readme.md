@@ -12,7 +12,7 @@ On your ComfyUI machine (Vast / cloud GPU):
 
 ```bash
 cd /workspace/ComfyUI/custom_nodes
-git clone <this-repo> tasty-downloader
+git clone https://github.com/TastyIMG/tasty-downloader/ tasty-downloader
 # restart ComfyUI — rclone auto-downloads to bin/ on first Download/Push/Settings test
 ```
 
