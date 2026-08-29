@@ -7,7 +7,14 @@ from server import PromptServer
 
 from .config_store import get_r2_config, load_config, r2_is_configured, save_config
 from .paths import CONFIG_PATH, DEFAULT_PUSH_FOLDERS, DEFAULT_R2, SECRET_PLACEHOLDER
-from .rclone_ops import rclone_available, rclone_bin, rclone_bin_or_install, rclone_s3_bucket_uri, run_cmd
+from .rclone_ops import (
+    rclone_available,
+    rclone_bin,
+    rclone_bin_or_install,
+    rclone_s3_backend_flags,
+    rclone_s3_bucket_uri,
+    run_cmd,
+)
 
 routes = PromptServer.instance.routes
 
@@ -256,7 +263,7 @@ async def save_settings(request):
             rclone = rclone_bin()
             result = await asyncio.to_thread(
                 run_cmd,
-                [rclone, "lsd", rclone_s3_bucket_uri(cfg["r2"]), "--s3-no-check-bucket"],
+                [rclone, "lsd", rclone_s3_bucket_uri(cfg["r2"]), *rclone_s3_backend_flags(cfg["r2"])],
                 60,
             )
             if result.returncode != 0:
