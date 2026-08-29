@@ -32,6 +32,6 @@ DEFAULT_R2 = {
     "config_url": "",
     "remote_name": "tasty-r2",
     "chunk_size": "64M",
-    "upload_concurrency": 8,
+    "upload_concurrency": 4,
     "push_folders": list(DEFAULT_PUSH_FOLDERS),
 }

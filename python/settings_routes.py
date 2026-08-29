@@ -27,7 +27,7 @@ def settings_payload(cfg=None):
         "config_url": r2.get("config_url") or "",
         "remote_name": r2.get("remote_name") or "tasty-r2",
         "chunk_size": r2.get("chunk_size") or "64M",
-        "upload_concurrency": r2.get("upload_concurrency") or 8,
+        "upload_concurrency": r2.get("upload_concurrency") or 4,
         "push_folders": r2.get("push_folders") or list(DEFAULT_PUSH_FOLDERS),
         "models_count": len(models),
         "rclone_available": rclone_available(),
@@ -219,9 +219,9 @@ async def save_settings(request):
 
     if "upload_concurrency" in body:
         try:
-            r2["upload_concurrency"] = int(body.get("upload_concurrency") or 8)
+            r2["upload_concurrency"] = int(body.get("upload_concurrency") or 4)
         except (TypeError, ValueError):
-            r2["upload_concurrency"] = 8
+            r2["upload_concurrency"] = 4
 
     if "push_folders" in body:
         folders = body.get("push_folders")

@@ -1,19 +1,39 @@
-# AGENTS.md — Configure Tasty R2 Downloader via terminal
+# AGENTS.md — Set up Tasty R2 Downloader on your ComfyUI box
 
-Copy this whole file into your AI coding agent. Ask it to configure this ComfyUI custom node on the current machine using the terminal and the user's existing Cloudflare CLI (`wrangler`) access. Do **not** ask the user to paste API keys into chat if they can be obtained from wrangler / env / existing config.
+**For you (the person who installed this custom node):** copy this entire file into your AI assistant (ChatGPT, Cursor, Claude, etc.) and ask it to configure **Tasty R2 Downloader on the same machine where ComfyUI is running**.
+
+**For the AI reading this:** you are helping a **user** who installed this node. Work in the terminal **on their ComfyUI instance** — usually a **Vast.ai** (or similar) GPU box, not a random folder on their laptop unless they say ComfyUI runs locally.
+
+Do **not** ask the user to paste API keys into chat if you can get them from `wrangler`, env vars, or an existing `config.json` on that box.
+
+## Where ComfyUI runs
+
+This custom node lives next to ComfyUI. Configure it **on that box**.
+
+| Typical host | Extension path |
+|---|---|
+| Vast.ai / cloud GPU template | `/workspace/ComfyUI/custom_nodes/tasty-downloader` |
+| Other cloud images | `…/ComfyUI/custom_nodes/tasty-downloader` (find it) |
+| Local ComfyUI (only if user says so) | wherever they cloned `tasty-downloader` under `custom_nodes/` |
+
+**Important:**
+
+- Run all commands on the **ComfyUI host** (SSH into Vast, or the machine where `main.py` runs).
+- Do **not** configure paths on the user’s laptop if their ComfyUI is on Vast.
+- This node **bundles rclone** — it auto-downloads to `$EXT/bin/rclone` on first Download, Push, or Settings **Save & Test**. Do **not** tell them to `apt install rclone` or use `curl install.sh | sudo bash`.
+- Fresh Vast images often have **no** rclone on PATH. Use `$EXT/bin/rclone`, not `/usr/bin/rclone`.
 
 ## Goal
 
 Set up **ComfyUI Tasty R2 Downloader** so Download and Push work:
 
-1. Find the extension folder
-2. Install `rclone` if missing
-3. Resolve Cloudflare account + R2 credentials via CLI / env (not manual Q&A)
-4. Write gitignored `config.json` (credentials + personal `models`)
-5. Create the rclone remote and test `lsd`
-6. Sync hosted `config.json` via one-liner if the user has a Config URL (see below)
-7. Tell the user to restart ComfyUI
-8. Warn that Push only appends locally — they must re-host `config.json` after Push until dynamic R2 sync exists
+1. Find the extension folder (`$EXT`)
+2. Resolve Cloudflare account + R2 credentials via CLI / env (not manual Q&A)
+3. Write gitignored `config.json` (credentials + personal `models`)
+4. Create the rclone remote and test `lsd` (bundled rclone downloads to `$EXT/bin/` on first use)
+5. Sync hosted `config.json` via one-liner if the user has a Config URL (see below)
+6. Tell the user to **restart ComfyUI**
+7. Warn that Push only appends locally — they must re-upload `config.json` after Push until dynamic R2 sync exists
 
 Do **not** commit `config.json` or secrets. Do not echo secrets in full if avoidable.
 
@@ -21,7 +41,7 @@ Do **not** commit `config.json` or secrets. Do not echo secrets in full if avoid
 
 ```bash
 ls /workspace/ComfyUI/custom_nodes/
-# often: tasty-downloader
+# folder name is usually: tasty-downloader
 ```
 
 ```bash
@@ -30,11 +50,17 @@ test -f "$EXT/__init__.py" && test -d "$EXT/python" && echo "found $EXT"
 export EXT
 ```
 
+If `/workspace/…` does not exist, search under the user’s ComfyUI install:
+
+```bash
+find ~ /workspace -path '*/custom_nodes/tasty-downloader/__init__.py' 2>/dev/null | head -3
+```
+
 Config files live in **`$EXT`** (not `$EXT/python`).
 
 ## Resolve credentials via Cloudflare CLI (preferred)
 
-Prefer tooling already authenticated on the machine:
+Use tooling already on the ComfyUI box:
 
 ```bash
 command -v wrangler || npm i -g wrangler
@@ -59,23 +85,21 @@ R2 S3 access keys may already exist as env vars:
 env | grep -E '^(CF_R2_|R2_|CLOUDFLARE_|AWS_)' | sed 's/=.*/=***/'
 ```
 
-Or in files the user already has (read if present; do not commit):
+Or in files already on the box (read if present; do not commit):
 
 - `$EXT/config.json` (prior setup)
 - `~/.config/` wrangler / cloudflare related files
-- project `.env` / Vast secrets
+- Vast instance env / secrets the user configured
 
-If access keys are still missing, create an R2 API token via Cloudflare dashboard/API **using wrangler-authenticated session where possible**, or use:
+If access keys are still missing, create an R2 API token via Cloudflare dashboard/API **using wrangler-authenticated session where possible**. Endpoint form:
 
-```bash
-# Account ID from whoami; endpoint form:
-# https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+```text
+https://<ACCOUNT_ID>.r2.cloudflarestorage.com
 ```
 
 Public base URL is the **r2.dev public bucket host** (HTTPS origin only), e.g. from an existing registry URL:
 
 ```bash
-# Infer from registry if present
 python3 - <<'PY'
 import json, os, re
 from pathlib import Path
@@ -98,14 +122,24 @@ print("")
 PY
 ```
 
-If inference fails, list public bucket / custom domain via wrangler docs for that bucket — do not invent a pub- host.
+If inference fails, list public bucket / custom domain for that bucket — do not invent a `pub-` host.
 
-## Install rclone
+## rclone (bundled — do not install system-wide)
+
+The extension downloads official rclone to **`$EXT/bin/rclone`** on first Download, Push, or Settings **Save & Test**.
+
+Optional verify (triggers download if needed):
 
 ```bash
-command -v rclone || curl -fsSL https://rclone.org/install.sh | sudo bash
-rclone version
+python3 - <<'PY'
+import os, sys
+sys.path.insert(0, os.path.join(os.environ["EXT"], "python"))
+from rclone_ops import ensure_rclone_binary
+print(ensure_rclone_binary())
+PY
 ```
+
+Use the printed path for smoke tests — usually `$EXT/bin/rclone`.
 
 ## Write config.json
 
@@ -135,7 +169,7 @@ cfg = {
     "config_url": os.environ.get("TASTY_R2_CONFIG_URL", ""),
     "remote_name": "tasty-r2",
     "chunk_size": "64M",
-    "upload_concurrency": 8,
+    "upload_concurrency": 4,
     "push_folders": [
       "diffusion_models", "unet", "loras", "vae", "clip", "clip_vision",
       "controlnet", "upscale_models", "checkpoints", "embeddings", "hypernetworks"
@@ -150,12 +184,22 @@ print("wrote", path)
 PY
 ```
 
-App also falls back to `CF_R2_ACCESS_KEY_ID` / `CF_R2_SECRET_ACCESS_KEY` if config keys are empty.
+The app also falls back to `CF_R2_ACCESS_KEY_ID` / `CF_R2_SECRET_ACCESS_KEY` if config keys are empty.
 
 ## Configure rclone remote
 
+Run on the **ComfyUI box** (same `$EXT`):
+
 ```bash
 EXT="${EXT:?set EXT}"
+
+RCLONE="$(python3 - <<'PY'
+import os, sys
+sys.path.insert(0, os.path.join(os.environ["EXT"], "python"))
+from rclone_ops import ensure_rclone_binary
+print(ensure_rclone_binary())
+PY
+)"
 
 eval "$(python3 - <<'PY'
 import json, os, shlex
@@ -174,7 +218,7 @@ for k, v in pairs.items():
 PY
 )"
 
-rclone config create "$RCLONE_REMOTE" s3 \
+"$RCLONE" config create "$RCLONE_REMOTE" s3 \
   provider Cloudflare \
   access_key_id "$CF_R2_ACCESS_KEY_ID" \
   secret_access_key "$CF_R2_SECRET_ACCESS_KEY" \
@@ -182,14 +226,14 @@ rclone config create "$RCLONE_REMOTE" s3 \
   region auto \
   no_check_bucket true
 
-rclone lsd "${RCLONE_REMOTE}:${CF_R2_BUCKET}"
+"$RCLONE" lsd "${RCLONE_REMOTE}:${CF_R2_BUCKET}"
 ```
 
 If `lsd` fails, fix credentials/endpoint before declaring success.
 
 ## Sync config (one file)
 
-`config.json` holds credentials, settings, and personal `models`. Host that single file; save **Config URL** in Settings.
+`config.json` holds credentials, settings, and personal `models`. Host that single file on R2; save **Config URL** in Settings.
 
 ```bash
 export TASTY_R2_CONFIG_URL="https://pub-xxxx.r2.dev/path/config.json"
@@ -203,6 +247,8 @@ curl -fsSL "$TASTY_R2_CONFIG_URL" -o "$EXT/config.json"
 python3 -m json.tool "$EXT/config.json" >/dev/null
 ```
 
+On Vast, use absolute paths (`/workspace/ComfyUI/custom_nodes/tasty-downloader/config.json`), not relative paths from `$HOME`.
+
 **Sync problem:** Push/Settings stay local until the user re-uploads `config.json` to the Config URL. Overwriting with a stale hosted copy wipes newer local rows.
 
 **Future:** dynamic read/write of config from the user’s R2. Not implemented yet — document only.
@@ -210,27 +256,41 @@ python3 -m json.tool "$EXT/config.json" >/dev/null
 ## Verify
 
 ```bash
+EXT="${EXT:?set EXT}"
+
+RCLONE="$(python3 - <<'PY'
+import os, sys
+sys.path.insert(0, os.path.join(os.environ["EXT"], "python"))
+from rclone_ops import ensure_rclone_binary
+print(ensure_rclone_binary())
+PY
+)"
+
 test -f "$EXT/config.json"
 test -d "$EXT/js"
 test -f "$EXT/python/server.py"
-rclone listremotes
-rclone lsd "tasty-r2:${CF_R2_BUCKET:?set CF_R2_BUCKET}" | head
+test -x "$RCLONE"
+"$RCLONE" listremotes
+"$RCLONE" lsd "tasty-r2:${CF_R2_BUCKET:?set CF_R2_BUCKET}" | head
 ```
 
 ## Finish
 
 Tell the user:
 
-1. Restart ComfyUI
-2. Open **Tasty Downloader** — Settings should show credentials as saved
-3. **Push** uploads to `{bucket}/models/{save_path}/{filename}` and appends into **local** `config.json` `models`
-4. **Download** uses registry URLs under `public_base_url`
-5. If they use a hosted config, remind them to re-upload `config.json` after Push/Settings, or the next one-liner replace will overwrite newer entries
-6. Note the planned direction: dynamic config read/write from the user’s R2 (not done yet)
+1. **Restart ComfyUI** on that box
+2. Hard-refresh the browser (`Ctrl+Shift+R`)
+3. Open **Tasty Downloader** — Settings should show credentials as saved
+4. **Download** pulls models from R2 (via bundled rclone when configured)
+5. **Push** uploads to `{bucket}/models/{save_path}/{filename}` and appends into **local** `config.json` `models`
+6. If they use a hosted config, re-upload `config.json` after Push/Settings, or the next sync one-liner will overwrite newer entries
+7. Dynamic config read/write from R2 is planned but not implemented yet
 
 ## Do not
 
-- Prompt the user to manually type keys when wrangler/env already has access
-- Commit secrets
+- Configure on the wrong machine (laptop terminal when ComfyUI is on Vast)
+- Ask the user to paste keys when `wrangler` / env / existing `config.json` already has them
+- Install system rclone — use `$EXT/bin/rclone`
 - Put `config.json` under `python/`
 - Treat `public_base_url` as a storage path — it is the public HTTPS host only
+- Commit or publish `config.json` (contains secrets)
