@@ -1,8 +1,8 @@
 config.json
 registry.local.json
-readme.json
-readme.md
+remote-config-check.json
+.remote-config-check.json
+r2.md
 __pycache__/
 *.py[cod]
 *$py.class
-r2.md
