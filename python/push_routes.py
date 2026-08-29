@@ -11,8 +11,9 @@ from .config_store import get_r2_config, r2_is_configured
 from .rclone_ops import (
     build_rclone_s3_copyto_cmd,
     delete_r2_object,
-    ensure_rclone_remote,
+    rclone_bin_or_install,
     rclone_available,
+    rclone_s3_uri,
     registry_key,
     registered_keys,
     run_rclone_with_progress,
@@ -86,10 +87,10 @@ async def push_model(request):
             {"type": "progress", "downloaded": 0, "total": file_size, "percent": 0}
         )
 
-        remote = await asyncio.to_thread(ensure_rclone_remote, r2)
+        await asyncio.to_thread(rclone_bin_or_install)
         object_key = f"models/{save_path}/{filename}"
-        dest = f"{remote}:{r2['bucket']}/{object_key}"
-        await asyncio.to_thread(delete_r2_object, r2, remote, object_key)
+        await asyncio.to_thread(delete_r2_object, r2, object_key)
+        dest = rclone_s3_uri(r2, object_key)
         cmd = build_rclone_s3_copyto_cmd(
             r2, src, dest, upload=True, file_size=file_size
         )

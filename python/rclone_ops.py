@@ -23,6 +23,55 @@ from .streaming import client_disconnected
 RCLONE_BIN_DIR = EXTENSION_DIR / "bin"
 RCLONE_VERSION = "v1.68.2"
 _install_lock = threading.Lock()
+
+
+def _rclone_conn_value(value: str) -> str:
+    text = str(value or "")
+    if not any(ch in text for ch in (",", "\\", '"')):
+        return text
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def rclone_s3_uri(r2, object_key: str) -> str:
+    """Inline S3 path — no `rclone config create`, no warm/ready state."""
+    endpoint = r2.get("endpoint") or f"https://{r2['account_id']}.r2.cloudflarestorage.com"
+    bucket = r2["bucket"]
+    key = object_key.replace("\\", "/").lstrip("/")
+    opts = (
+        "provider=Cloudflare,"
+        f"access_key_id={_rclone_conn_value(r2['access_key_id'])},"
+        f"secret_access_key={_rclone_conn_value(r2['secret_access_key'])},"
+        f"endpoint={_rclone_conn_value(endpoint)},"
+        "region=auto,"
+        "no_check_bucket=true"
+    )
+    return f":s3,{opts}:{bucket}/{key}"
+
+
+def rclone_s3_bucket_uri(r2) -> str:
+    endpoint = r2.get("endpoint") or f"https://{r2['account_id']}.r2.cloudflarestorage.com"
+    bucket = r2["bucket"]
+    opts = (
+        "provider=Cloudflare,"
+        f"access_key_id={_rclone_conn_value(r2['access_key_id'])},"
+        f"secret_access_key={_rclone_conn_value(r2['secret_access_key'])},"
+        f"endpoint={_rclone_conn_value(endpoint)},"
+        "region=auto,"
+        "no_check_bucket=true"
+    )
+    return f":s3,{opts}:{bucket}"
+
+
+def bootstrap_rclone_binary_async():
+    """Install bundled rclone at ComfyUI startup so Download/Push never wait on first click."""
+
+    def _run():
+        try:
+            ensure_rclone_binary()
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True, name="tasty-r2-bootstrap").start()
 PROGRESS_EMIT_INTERVAL_SEC = 0.25
 
 PERCENT_RE = re.compile(r",\s*(\d+(?:\.\d+)?)%")
@@ -57,19 +106,17 @@ def upload_transfer_options(file_size: int, r2) -> tuple[str, int]:
     return chunk, concurrency
 
 
-def delete_r2_object(r2, remote, object_key):
+def delete_r2_object(r2, object_key):
     """Remove a stale/partial object before re-upload (best-effort; ignore missing)."""
     rclone = rclone_bin()
-    key = object_key.replace("\\", "/").lstrip("/")
-    target = f"{remote}:{r2['bucket']}/{key}"
+    target = rclone_s3_uri(r2, object_key)
     run_cmd([rclone, "deletefile", target, "--s3-no-check-bucket"], timeout=300)
 
 
-def rclone_object_size(r2, remote, object_key):
+def rclone_object_size(r2, object_key):
     """Return remote object size in bytes, or 0 if unknown."""
     rclone = rclone_bin()
-    key = object_key.replace("\\", "/").lstrip("/")
-    target = f"{remote}:{r2['bucket']}/{key}"
+    target = rclone_s3_uri(r2, object_key)
     result = run_cmd(
         [rclone, "lsjson", target, "--files-only", "--s3-no-check-bucket"],
         timeout=120,
@@ -265,38 +312,22 @@ def rclone_available():
     return _rclone_platform_supported()
 
 
-def rclone_bin():
+def rclone_bin_or_install():
+    """Return rclone path; install bundled copy only if missing (startup usually did this already)."""
+    bundled = _bundled_rclone_path()
+    if bundled.is_file():
+        if os.access(bundled, os.X_OK):
+            return str(bundled)
+        _mark_executable(bundled)
+        return str(bundled)
+    system_path = shutil.which("rclone")
+    if system_path:
+        return system_path
     return ensure_rclone_binary()
 
 
-def ensure_rclone_remote(r2):
-    rclone = rclone_bin()
-    remote = r2.get("remote_name") or "tasty-r2"
-    endpoint = r2.get("endpoint") or f"https://{r2['account_id']}.r2.cloudflarestorage.com"
-    cmd = [
-        rclone,
-        "config",
-        "create",
-        remote,
-        "s3",
-        "provider",
-        "Cloudflare",
-        "access_key_id",
-        r2["access_key_id"],
-        "secret_access_key",
-        r2["secret_access_key"],
-        "endpoint",
-        endpoint,
-        "region",
-        "auto",
-        "no_check_bucket",
-        "true",
-    ]
-    result = run_cmd(cmd)
-    if result.returncode != 0:
-        err = (result.stderr or result.stdout or "rclone config failed").strip()
-        raise RuntimeError(err)
-    return remote
+def rclone_bin():
+    return rclone_bin_or_install()
 
 
 def registry_key(save_path, filename):

@@ -12,10 +12,9 @@ from .config_store import get_r2_config, load_config
 from .paths import LOCAL_REGISTRY_PATH
 from .rclone_ops import (
     build_rclone_s3_copyto_cmd,
-    ensure_rclone_remote,
     prefer_rclone_download,
     r2_model_object_key,
-    rclone_object_size,
+    rclone_s3_uri,
     run_rclone_with_progress,
 )
 from .registry import find_entry, get_registry_path, load_registry
@@ -32,6 +31,18 @@ def registry_available():
         return True
     models = load_config().get("models") or []
     return isinstance(models, list) and len(models) > 0
+
+
+async def url_content_length(url):
+    timeout = aiohttp.ClientTimeout(total=15, connect=10)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.head(url, allow_redirects=True) as resp:
+                if resp.status >= 400:
+                    return 0
+                return int(resp.headers.get("Content-Length") or 0)
+    except Exception:
+        return 0
 
 
 async def download_via_http(url, temp_file, request, send_event):
@@ -76,6 +87,26 @@ async def download_via_http(url, temp_file, request, send_event):
                             }
                         )
                         last_progress_at = now
+
+
+async def download_via_rclone(r2, save_path, filename, url, temp_file, request, send_event):
+    from .rclone_ops import rclone_bin_or_install
+
+    await asyncio.to_thread(rclone_bin_or_install)
+    object_key = r2_model_object_key(save_path, filename)
+    src = rclone_s3_uri(r2, object_key)
+    file_size = await url_content_length(url)
+    if file_size:
+        await send_event(
+            {
+                "type": "progress",
+                "downloaded": 0,
+                "total": file_size,
+                "percent": 0,
+            }
+        )
+    cmd = build_rclone_s3_copyto_cmd(r2, src, temp_file, upload=False)
+    await run_rclone_with_progress(cmd, file_size, request, send_event)
 
 
 @routes.get("/tasty-r2/list")
@@ -147,33 +178,10 @@ async def download_model(request):
         if os.path.exists(temp_file):
             os.remove(temp_file)
 
-        await send_event({"type": "progress", "downloaded": 0, "total": 0, "percent": 0})
-
         if use_rclone:
-            await send_event(
-                {
-                    "type": "progress",
-                    "downloaded": 0,
-                    "total": 0,
-                    "percent": 0,
-                    "status": "Preparing rclone…",
-                }
+            await download_via_rclone(
+                r2, save_path, filename, url, temp_file, request, send_event
             )
-            remote = await asyncio.to_thread(ensure_rclone_remote, r2)
-            object_key = r2_model_object_key(save_path, filename)
-            file_size = await asyncio.to_thread(rclone_object_size, r2, remote, object_key)
-            src = f"{remote}:{r2['bucket']}/{object_key}"
-            if file_size:
-                await send_event(
-                    {
-                        "type": "progress",
-                        "downloaded": 0,
-                        "total": file_size,
-                        "percent": 0,
-                    }
-                )
-            cmd = build_rclone_s3_copyto_cmd(r2, src, temp_file, upload=False)
-            await run_rclone_with_progress(cmd, file_size, request, send_event)
         else:
             await download_via_http(url, temp_file, request, send_event)
 

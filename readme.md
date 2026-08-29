@@ -30,8 +30,8 @@ Tabs:
 
 | Tab | What it does |
 |---|---|
-| **Download** | Registry models → Download / Downloaded (green) / Cancel — R2 via rclone when configured |
-| **Push** | Local files not in registry → Push / Pushed (blue) via rclone |
+| **Download** | R2 models: **rclone S3** starts on click (credentials inline — no config/warm step). External URLs: HTTP. |
+| **Push** | **rclone S3** upload (same inline credentials) |
 | **Settings** | R2 credentials + push folders (saved to gitignored `config.json`) |
 
 ## Registry

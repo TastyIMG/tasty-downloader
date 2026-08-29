@@ -15,7 +15,7 @@ Everything that broke or shipped wrong in this project. **Append new rows; do no
 | Server disconnect detection | Assumed `request.is_disconnected()` exists on Comfy’s aiohttp | Use helper in `streaming.py` that works with Comfy’s stack |
 | ~1 MB/s R2 downloads | Download used aiohttp via public URL; opened file every 1 MiB chunk; progress `drain()` every chunk | R2 models: `rclone copyto` from `{bucket}/models/...` (mirror Push). External URLs (HF, etc.): HTTP with 4 MiB chunks + throttled progress |
 | Manual rclone install | Docs/UI told users to `curl install.sh \| sudo bash` | Auto-download official rclone zip to `$EXT/bin/rclone` on first use; gitignore `bin/` |
-| Download stuck at **0%** with rclone path | rclone **1.75+** dropped `Transferred:` prefix; stdout **pipe buffering** hid `--progress` stats until end | Fixed regex; drop `--progress`/`--use-json-log`; run via **PTY** (+ `stdbuf -oL` on Linux); probe remote size for download total |
+| Blocking **“Preparing rclone”** / warm-ready HTTP fallback | `config create` + cache + dual paths on every click | **Inline `:s3,...:bucket/key` URIs** from `config.json` — spawn rclone immediately; bootstrap binary once at ComfyUI start |
 
 ---
 
