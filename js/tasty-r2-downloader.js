@@ -174,10 +174,11 @@ const styles = `
 `;
 
 function formatBytes(bytes) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+  const n = Number(bytes) || 0;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  return `${(n / 1024 ** 3).toFixed(2)} GB`;
 }
 
 class TastyR2Modal {
@@ -230,7 +231,7 @@ class TastyR2Modal {
   }
 
   setError(msg) {
-    this.errorEl.textContent = msg || "";
+    if (this.errorEl) this.errorEl.textContent = msg || "";
   }
 
   async refresh() {
@@ -370,19 +371,27 @@ class TastyR2Modal {
   }
 
   updateProgress(progressEl, event) {
-    const { downloaded, total, percent } = event;
+    if (!progressEl?.fill || !progressEl?.label) return;
+    const downloaded = Number(event.downloaded) || 0;
+    const total = Number(event.total) || 0;
+    const percent = event.percent != null
+      ? Math.max(0, Math.min(100, Number(event.percent)))
+      : (total ? Math.min(100, Math.round((downloaded * 100) / total)) : null);
+
     if (percent != null) {
       progressEl.fill.style.width = `${percent}%`;
-      progressEl.label.textContent = `${percent}%`;
+      progressEl.label.textContent = total
+        ? `${percent}% · ${formatBytes(downloaded)} / ${formatBytes(total)}`
+        : `${percent}%`;
       return;
     }
-    progressEl.fill.style.width = total ? `${Math.min(100, Math.round((downloaded / total) * 100))}%` : "100%";
-    progressEl.label.textContent = total
-      ? `${formatBytes(downloaded)} / ${formatBytes(total)}`
-      : formatBytes(downloaded);
+
+    progressEl.fill.style.width = "100%";
+    progressEl.label.textContent = formatBytes(downloaded);
   }
 
   restoreDownloadButton(actionEl, filename) {
+    if (!actionEl?.isConnected) return;
     const btn = document.createElement("button");
     btn.className = "tasty-r2-btn";
     btn.type = "button";
@@ -392,24 +401,61 @@ class TastyR2Modal {
     actionEl.appendChild(btn);
   }
 
+  parseDownloadEvent(line) {
+    if (!line.trim()) return null;
+    try {
+      return JSON.parse(line);
+    } catch {
+      return null;
+    }
+  }
+
+  handleDownloadEvent(event, progressEl) {
+    if (!event) return false;
+    if (event.type === "progress") {
+      this.updateProgress(progressEl, event);
+      return false;
+    }
+    if (event.type === "done") {
+      if (progressEl?.fill) progressEl.fill.style.width = "100%";
+      if (progressEl?.label) progressEl.label.textContent = "Done";
+      return true;
+    }
+    if (event.type === "error") {
+      throw new Error(event.error || "Download failed");
+    }
+    return false;
+  }
+
   async download(filename, actionEl) {
     if (this.downloading.has(filename)) return;
     this.downloading.add(filename);
     const progressEl = this.createProgress(actionEl);
     this.setError("");
 
+    let succeeded = false;
     try {
-      const apiBase = typeof api.apiURL === "function" ? api.apiURL() : api.apiURL;
-      const resp = await fetch(`${apiBase}/tasty-r2/download`, {
+      // Same path helper as /tasty-r2/list — do not call api.apiURL() bare.
+      const resp = await api.fetchApi("/tasty-r2/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ filename }),
       });
 
-      const contentType = resp.headers.get("content-type") || "";
-      if (!resp.ok || !contentType.includes("ndjson")) {
-        const data = await resp.json().catch(() => ({}));
-        throw new Error(data.error || "Download failed");
+      if (!resp.ok) {
+        const text = await resp.text();
+        let message = text || "Download failed";
+        try {
+          const data = JSON.parse(text);
+          if (data.error) message = data.error;
+        } catch {
+          // use raw response text
+        }
+        throw new Error(message);
+      }
+
+      if (!resp.body) {
+        throw new Error("Download failed: empty response");
       }
 
       const reader = resp.body.getReader();
@@ -426,27 +472,31 @@ class TastyR2Modal {
         buffer = lines.pop() || "";
 
         for (const line of lines) {
-          if (!line.trim()) continue;
-          const event = JSON.parse(line);
-          if (event.type === "progress") {
-            this.updateProgress(progressEl, event);
-          } else if (event.type === "done") {
+          if (this.handleDownloadEvent(this.parseDownloadEvent(line), progressEl)) {
             doneReceived = true;
-            progressEl.fill.style.width = "100%";
-            progressEl.label.textContent = "Done";
-          } else if (event.type === "error") {
-            throw new Error(event.error || "Download failed");
           }
+        }
+      }
+
+      buffer += decoder.decode();
+      for (const line of buffer.split("\n")) {
+        if (this.handleDownloadEvent(this.parseDownloadEvent(line), progressEl)) {
+          doneReceived = true;
         }
       }
 
       if (!doneReceived) {
         throw new Error("Download ended unexpectedly");
       }
+      succeeded = true;
     } catch (err) {
       this.setError(`${filename}: ${err.message || err}`);
     } finally {
       this.downloading.delete(filename);
+      if (succeeded) {
+        // Keep "Done" visible briefly so progress UI is actually seen.
+        await new Promise((r) => setTimeout(r, 800));
+      }
       this.restoreDownloadButton(actionEl, filename);
     }
   }
