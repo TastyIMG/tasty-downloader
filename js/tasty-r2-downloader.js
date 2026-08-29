@@ -150,7 +150,13 @@ const styles = `
   flex-direction: column;
   gap: 4px;
 }
+.tasty-r2-progress-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 .tasty-r2-progress-bar {
+  flex: 1;
   height: 6px;
   background: #222;
   border-radius: 3px;
@@ -167,6 +173,19 @@ const styles = `
   color: #aaa;
   text-align: center;
   line-height: 1.2;
+}
+.tasty-r2-cancel {
+  background: #533;
+  border: 1px solid #855;
+  color: #fcc;
+  padding: 2px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 10px;
+  flex-shrink: 0;
+}
+.tasty-r2-cancel:hover {
+  background: #644;
 }
 .tasty-r2-empty {
   padding: 24px 16px;
@@ -195,6 +214,7 @@ class TastyR2Modal {
     this.errorEl = null;
     this.downloading = new Set();
     this.downloaded = new Set();
+    this.abortControllers = new Map();
     this.openSections = new Set();
   }
 
@@ -231,6 +251,10 @@ class TastyR2Modal {
   }
 
   close() {
+    for (const controller of this.abortControllers.values()) {
+      controller.abort();
+    }
+    this.abortControllers.clear();
     if (this.overlay) {
       this.overlay.remove();
       this.overlay = null;
@@ -379,18 +403,27 @@ class TastyR2Modal {
     return btn;
   }
 
-  createProgress(actionEl) {
+  createProgress(actionEl, onCancel) {
     actionEl.innerHTML = `
       <div class="tasty-r2-progress">
-        <div class="tasty-r2-progress-bar">
-          <div class="tasty-r2-progress-fill"></div>
+        <div class="tasty-r2-progress-top">
+          <div class="tasty-r2-progress-bar">
+            <div class="tasty-r2-progress-fill"></div>
+          </div>
+          <button class="tasty-r2-cancel" type="button">Cancel</button>
         </div>
         <div class="tasty-r2-progress-label">Starting...</div>
       </div>
     `;
+    const cancelBtn = actionEl.querySelector(".tasty-r2-cancel");
+    cancelBtn.onclick = (e) => {
+      e.stopPropagation();
+      onCancel?.();
+    };
     return {
       fill: actionEl.querySelector(".tasty-r2-progress-fill"),
       label: actionEl.querySelector(".tasty-r2-progress-label"),
+      cancelBtn,
     };
   }
 
@@ -449,16 +482,26 @@ class TastyR2Modal {
   async download(filename, actionEl) {
     if (this.downloading.has(filename)) return;
     this.downloading.add(filename);
-    const progressEl = this.createProgress(actionEl);
+
+    const abortController = new AbortController();
+    this.abortControllers.set(filename, abortController);
+
+    const progressEl = this.createProgress(actionEl, () => {
+      abortController.abort();
+      if (progressEl.label) progressEl.label.textContent = "Cancelling...";
+      if (progressEl.cancelBtn) progressEl.cancelBtn.disabled = true;
+    });
     this.setError("");
 
     let succeeded = false;
+    let cancelled = false;
     try {
       // Same path helper as /tasty-r2/list — do not call api.apiURL() bare.
       const resp = await api.fetchApi("/tasty-r2/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ filename }),
+        signal: abortController.signal,
       });
 
       if (!resp.ok) {
@@ -482,40 +525,63 @@ class TastyR2Modal {
       let buffer = "";
       let doneReceived = false;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      try {
+        while (true) {
+          if (abortController.signal.aborted) {
+            await reader.cancel();
+            cancelled = true;
+            break;
+          }
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        for (const line of lines) {
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            if (this.handleDownloadEvent(this.parseDownloadEvent(line), progressEl)) {
+              doneReceived = true;
+            }
+          }
+        }
+      } catch (err) {
+        if (err?.name === "AbortError" || abortController.signal.aborted) {
+          cancelled = true;
+        } else {
+          throw err;
+        }
+      }
+
+      if (!cancelled) {
+        buffer += decoder.decode();
+        for (const line of buffer.split("\n")) {
           if (this.handleDownloadEvent(this.parseDownloadEvent(line), progressEl)) {
             doneReceived = true;
           }
         }
-      }
 
-      buffer += decoder.decode();
-      for (const line of buffer.split("\n")) {
-        if (this.handleDownloadEvent(this.parseDownloadEvent(line), progressEl)) {
-          doneReceived = true;
+        if (!doneReceived) {
+          throw new Error("Download ended unexpectedly");
         }
+        this.downloaded.add(filename);
+        succeeded = true;
       }
-
-      if (!doneReceived) {
-        throw new Error("Download ended unexpectedly");
-      }
-      this.downloaded.add(filename);
-      succeeded = true;
     } catch (err) {
-      this.setError(`${filename}: ${err.message || err}`);
+      if (err?.name === "AbortError" || abortController.signal.aborted) {
+        cancelled = true;
+      } else {
+        this.setError(`${filename}: ${err.message || err}`);
+      }
     } finally {
       this.downloading.delete(filename);
+      this.abortControllers.delete(filename);
       if (succeeded) {
-        // Keep "Done" visible briefly so progress UI is actually seen.
         await new Promise((r) => setTimeout(r, 800));
+      } else if (cancelled && progressEl.label) {
+        progressEl.label.textContent = "Cancelled";
+        await new Promise((r) => setTimeout(r, 500));
       }
       this.restoreDownloadButton(actionEl, filename);
     }
