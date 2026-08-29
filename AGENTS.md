@@ -11,8 +11,9 @@ Set up **ComfyUI Tasty R2 Downloader** so Download and Push work:
 3. Resolve Cloudflare account + R2 credentials via CLI / env (not manual Q&A)
 4. Write gitignored `config.json`
 5. Create the rclone remote and test `lsd`
-6. Optionally sync `registry.local.json`
+6. Sync `registry.local.json` via one-liner replace if the user has a hosted copy (see below)
 7. Tell the user to restart ComfyUI
+8. Warn that Push only appends locally — they must re-host `registry.local.json` after Push until dynamic R2 registry sync exists
 
 Do **not** commit `config.json`, `registry.local.json`, or secrets. Do not echo secrets in full if avoidable.
 
@@ -184,16 +185,33 @@ rclone lsd "${RCLONE_REMOTE}:${CF_R2_BUCKET}"
 
 If `lsd` fails, fix credentials/endpoint before declaring success.
 
-## Optional: sync personal registry
+## Sync personal registry (one-liner replace)
+
+`registry.local.json` is **local-only** after Push. It is not uploaded to R2 automatically. New machines / reinstalls need the user to **download and replace** their hosted copy.
+
+One-liner (user supplies their own URL — never commit personal URLs):
 
 ```bash
-# Set YOUR hosted registry URL — never commit personal URLs to the repo
-export TASTY_R2_LOCAL_REGISTRY_URL="https://pub-xxxx.r2.dev/path/registry.local.json"
-bash "$EXT/scripts/sync-local-registry.sh"
-# or:
 curl -fsSL "$TASTY_R2_LOCAL_REGISTRY_URL" -o "$EXT/registry.local.json"
+```
+
+Or:
+
+```bash
+curl -fsSL "https://pub-xxxx.r2.dev/path/to/registry.local.json" -o "$EXT/registry.local.json"
 python3 -m json.tool "$EXT/registry.local.json" >/dev/null
 ```
+
+Helper script (same overwrite behavior):
+
+```bash
+export TASTY_R2_LOCAL_REGISTRY_URL="https://pub-xxxx.r2.dev/path/to/registry.local.json"
+bash "$EXT/scripts/sync-local-registry.sh"
+```
+
+**Sync problem:** Push appends on the box only. If the user later runs the one-liner against an **old** hosted file, those Push rows are wiped. After Pushing, they must re-upload the updated `registry.local.json` to their R2 public path.
+
+**Future:** registry should be dynamic and read/write from the **user’s** R2 (configured public base / object path), not a manual curl replace loop. Not implemented yet — document only.
 
 ## Verify
 
@@ -211,8 +229,10 @@ Tell the user:
 
 1. Restart ComfyUI
 2. Open **Tasty Downloader** — Settings should show credentials as saved
-3. **Push** uploads to `{bucket}/models/{save_path}/{filename}` and appends `registry.local.json`
+3. **Push** uploads to `{bucket}/models/{save_path}/{filename}` and appends **local** `registry.local.json` only
 4. **Download** uses registry URLs under `public_base_url`
+5. If they use a hosted registry, remind them to re-upload `registry.local.json` after Push, or the next one-liner replace will overwrite newer entries
+6. Note the planned direction: dynamic registry read/write from the user’s R2 (not done yet)
 
 ## Do not
 

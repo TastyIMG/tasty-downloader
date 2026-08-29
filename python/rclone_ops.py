@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import shutil
@@ -15,6 +16,8 @@ BYTES_RE = re.compile(
     r"Transferred:\s+([0-9.]+\s*[KMGT]?i?B)\s*/\s*([0-9.]+\s*[KMGT]?i?B)",
     re.IGNORECASE,
 )
+# rclone --use-json-log stats lines
+JSON_LINE_RE = re.compile(r"\{.*\}")
 
 
 def run_cmd(cmd, timeout=60):
@@ -70,41 +73,65 @@ def ensure_rclone_remote(r2):
     return remote
 
 
+def registry_key(save_path, filename):
+    return f"{save_path.strip('/')}/{filename}"
+
+
+def registered_keys():
+    from .registry import load_registry
+
+    keys = set()
+    for entry in load_registry():
+        sp = (entry.get("save_path") or "").strip("/")
+        fn = entry.get("filename") or ""
+        if sp and fn:
+            keys.add(registry_key(sp, fn))
+            keys.add(fn)
+    return keys
+
+
 def scan_push_candidates():
-    registered = registry_filenames()
+    registered = registered_keys()
     r2 = get_r2_config()
     folders = r2.get("push_folders") or DEFAULT_PUSH_FOLDERS
-    models_dir = folder_paths.models_dir
+    models_dir = os.path.abspath(folder_paths.models_dir)
     results = []
+    seen = set()
 
-    for save_path in folders:
-        folder = os.path.join(models_dir, save_path)
+    for top in folders:
+        folder = os.path.join(models_dir, top)
         if not os.path.isdir(folder):
             continue
-        try:
-            names = os.listdir(folder)
-        except OSError:
-            continue
-        for name in names:
-            if name.startswith(".") or name.endswith(".partial"):
-                continue
-            full = os.path.join(folder, name)
-            if not os.path.isfile(full):
-                continue
-            try:
-                size = os.path.getsize(full)
-            except OSError:
-                size = 0
-            results.append(
-                {
-                    "filename": name,
-                    "save_path": save_path,
-                    "for_model": Path(name).stem,
-                    "size": size,
-                    # Same idea as download list `exists`: persisted done-state
-                    "registered": name in registered,
-                }
-            )
+        for root, dirs, files in os.walk(folder):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            for name in files:
+                if name.startswith(".") or name.endswith(".partial"):
+                    continue
+                full = os.path.join(root, name)
+                if not os.path.isfile(full):
+                    continue
+                rel = os.path.relpath(full, models_dir).replace("\\", "/")
+                save_path = str(Path(rel).parent).replace("\\", "/")
+                if save_path == ".":
+                    continue
+                filename = Path(rel).name
+                key = registry_key(save_path, filename)
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    size = os.path.getsize(full)
+                except OSError:
+                    size = 0
+                results.append(
+                    {
+                        "filename": filename,
+                        "save_path": save_path,
+                        "for_model": Path(filename).stem,
+                        "size": size,
+                        "registered": key in registered or filename in registered,
+                    }
+                )
 
     results.sort(key=lambda item: (item["save_path"], item["filename"].lower()))
     return results
@@ -125,6 +152,27 @@ def parse_size_to_bytes(text):
 
 
 def parse_rclone_progress(line, fallback_total=0):
+    """Return (downloaded, total, percent) or (None, None, None) if unparseable."""
+    line = line.strip()
+    if not line:
+        return None, None, None
+
+    # JSON log stats (preferred when --use-json-log is set)
+    if line.startswith("{"):
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            stats = payload.get("stats") or payload
+            if isinstance(stats, dict) and (
+                "bytes" in stats or "totalBytes" in stats or "transfers" in stats
+            ):
+                downloaded = int(stats.get("bytes") or 0)
+                total = int(stats.get("totalBytes") or fallback_total or 0)
+                percent = round(downloaded * 100 / total) if total else None
+                return downloaded, total or None, percent
+
     percent = None
     downloaded = None
     total = fallback_total or None
@@ -136,8 +184,20 @@ def parse_rclone_progress(line, fallback_total=0):
     sizes = BYTES_RE.search(line)
     if sizes:
         downloaded = parse_size_to_bytes(sizes.group(1))
-        total = parse_size_to_bytes(sizes.group(2)) or total
+        parsed_total = parse_size_to_bytes(sizes.group(2))
+        if parsed_total:
+            total = parsed_total
         if percent is None and downloaded is not None and total:
             percent = round(downloaded * 100 / total)
 
+    if downloaded is None and percent is None:
+        return None, None, None
     return downloaded, total, percent
+
+
+def split_rclone_output(buffer: str):
+    """rclone --progress uses CR updates; split on CR and LF."""
+    parts = re.split(r"[\r\n]+", buffer)
+    incomplete = parts.pop() if parts else ""
+    lines = [p.strip() for p in parts if p.strip()]
+    return lines, incomplete
