@@ -135,6 +135,13 @@ const styles = `
   opacity: 0.5;
   cursor: wait;
 }
+.tasty-r2-btn.done {
+  opacity: 1;
+  cursor: default;
+  background: #2f4f3a;
+  border-color: #4a7;
+  color: #cfc;
+}
 .tasty-r2-action {
   min-width: 110px;
 }
@@ -187,6 +194,7 @@ class TastyR2Modal {
     this.body = null;
     this.errorEl = null;
     this.downloading = new Set();
+    this.downloaded = new Set();
     this.openSections = new Set();
   }
 
@@ -244,6 +252,9 @@ class TastyR2Modal {
       }
       if (!Array.isArray(data)) {
         throw new Error("Invalid registry response");
+      }
+      for (const item of data) {
+        if (item.exists) this.downloaded.add(item.filename);
       }
       this.render(data);
     } catch (err) {
@@ -342,17 +353,30 @@ class TastyR2Modal {
 
     const action = document.createElement("div");
     action.className = "tasty-r2-action";
+    action.appendChild(this.createActionButton(item.filename));
+    row.append(info, action);
+    return row;
+  }
 
+  createActionButton(filename) {
     const btn = document.createElement("button");
     btn.className = "tasty-r2-btn";
     btn.type = "button";
-    btn.textContent = "Download";
-    btn.disabled = this.downloading.has(item.filename);
-    btn.onclick = () => this.download(item.filename, action);
 
-    action.appendChild(btn);
-    row.append(info, action);
-    return row;
+    if (this.downloaded.has(filename)) {
+      btn.textContent = "Downloaded";
+      btn.classList.add("done");
+      btn.disabled = true;
+      return btn;
+    }
+
+    btn.textContent = "Download";
+    btn.disabled = this.downloading.has(filename);
+    btn.onclick = () => {
+      const action = btn.parentElement;
+      if (action) this.download(filename, action);
+    };
+    return btn;
   }
 
   createProgress(actionEl) {
@@ -392,13 +416,8 @@ class TastyR2Modal {
 
   restoreDownloadButton(actionEl, filename) {
     if (!actionEl?.isConnected) return;
-    const btn = document.createElement("button");
-    btn.className = "tasty-r2-btn";
-    btn.type = "button";
-    btn.textContent = "Download";
-    btn.onclick = () => this.download(filename, actionEl);
     actionEl.innerHTML = "";
-    actionEl.appendChild(btn);
+    actionEl.appendChild(this.createActionButton(filename));
   }
 
   parseDownloadEvent(line) {
@@ -488,6 +507,7 @@ class TastyR2Modal {
       if (!doneReceived) {
         throw new Error("Download ended unexpectedly");
       }
+      this.downloaded.add(filename);
       succeeded = true;
     } catch (err) {
       this.setError(`${filename}: ${err.message || err}`);

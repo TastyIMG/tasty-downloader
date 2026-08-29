@@ -2,8 +2,8 @@
   {
     "for_model": "Flux 1 Dev",
     "filename": "flux1-dev-fp8.safetensors",
-    "save_path": "checkpoints",
-    "url": "https://pub-xxxx.r2.dev/models/checkpoints/flux1-dev-fp8.safetensors"
+    "save_path": "diffusion_models",
+    "url": "https://pub-xxxx.r2.dev/models/diffusion_models/flux1-dev-fp8.safetensors"
   },
   {
     "for_model": "Flux 1 Dev",
