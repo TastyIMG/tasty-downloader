@@ -10,6 +10,7 @@ from server import PromptServer
 routes = PromptServer.instance.routes
 EXTENSION_DIR = Path(__file__).parent
 DEFAULT_REGISTRY_PATH = EXTENSION_DIR / "registry.json"
+LOCAL_REGISTRY_PATH = EXTENSION_DIR / "registry.local.json"
 CONFIG_PATH = EXTENSION_DIR / "config.json"
 
 
@@ -36,12 +37,25 @@ def _parse_registry(data):
     return []
 
 
-def _load_registry():
-    path = _get_registry_path()
+def _read_registry_file(path):
     if not path.exists():
         return []
     with open(path, "r", encoding="utf-8") as f:
         return _parse_registry(json.load(f))
+
+
+def _load_registry():
+    entries = _read_registry_file(_get_registry_path())
+    local_entries = _read_registry_file(LOCAL_REGISTRY_PATH)
+    if not local_entries:
+        return entries
+
+    by_filename = {entry.get("filename"): entry for entry in entries if entry.get("filename")}
+    for entry in local_entries:
+        filename = entry.get("filename")
+        if filename:
+            by_filename[filename] = entry
+    return list(by_filename.values())
 
 
 def _find_entry(filename):
@@ -54,7 +68,7 @@ def _find_entry(filename):
 @routes.get("/tasty-r2/list")
 async def list_models(_request):
     registry_path = _get_registry_path()
-    if not registry_path.exists():
+    if not registry_path.exists() and not LOCAL_REGISTRY_PATH.exists():
         return web.json_response(
             {"error": f"Registry not found: {registry_path}"},
             status=404,
@@ -90,7 +104,7 @@ async def download_model(request):
         return web.json_response({"error": "filename required"}, status=400)
 
     registry_path = _get_registry_path()
-    if not registry_path.exists():
+    if not registry_path.exists() and not LOCAL_REGISTRY_PATH.exists():
         return web.json_response(
             {"error": f"Registry not found: {registry_path}"},
             status=404,
