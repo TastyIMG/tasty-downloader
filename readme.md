@@ -4,7 +4,7 @@ Download models from your public R2 storage into the correct ComfyUI folders. Pu
 
 **Typical install:** [Vast.ai](https://vast.ai) (or similar cloud GPU) ComfyUI at `/workspace/ComfyUI/custom_nodes/tasty-downloader`.
 
-**First-time setup with AI:** after you clone this node on your ComfyUI box, copy [AGENTS.md](AGENTS.md) into your AI assistant and ask it to configure R2 + `config.json` in the terminal **on that same machine** (SSH into Vast, not your laptop).
+**First-time setup with AI:** copy [AGENTS.md](AGENTS.md) into your assistant — it walks you through putting R2 secrets in **Settings** (the agent usually can’t SSH into your Vast box).
 
 ## Install
 
