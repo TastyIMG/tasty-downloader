@@ -26,8 +26,13 @@ _install_lock = threading.Lock()
 
 
 def _rclone_conn_value(value: str) -> str:
+    """Quote connection-string values that would break ``:s3,k=v:path`` parsing.
+
+    Unquoted ``endpoint=https://…`` is cut at the first ``:``, so rclone sees
+    endpoint=``https`` and fails with "Custom endpoint `https` was not a valid URI".
+    """
     text = str(value or "")
-    if not any(ch in text for ch in (",", "\\", '"')):
+    if not any(ch in text for ch in (",", ":", "\\", '"')):
         return text
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
