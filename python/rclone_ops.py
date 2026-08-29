@@ -24,7 +24,9 @@ _install_lock = threading.Lock()
 
 PERCENT_RE = re.compile(r",\s*(\d+(?:\.\d+)?)%")
 BYTES_RE = re.compile(
-    r"Transferred:\s+([0-9.]+\s*[KMGT]?i?B)\s*/\s*([0-9.]+\s*[KMGT]?i?B)",
+    r"(?:Transferred:\s+)?"
+    r"(?:[0-9/:\s+\-T.]+\sINFO\s+:\s+)?"
+    r"([0-9.]+\s*[KMGT]?i?B)\s*/\s*([0-9.]+\s*[KMGT]?i?B)",
     re.IGNORECASE,
 )
 # rclone --use-json-log stats lines
@@ -370,6 +372,7 @@ def build_rclone_s3_copyto_cmd(r2, src, dest, *, upload=False):
         src,
         dest,
         "-v",
+        "--use-json-log",
         "--s3-no-check-bucket",
         "--s3-chunk-size",
         str(r2.get("chunk_size") or "64M"),
