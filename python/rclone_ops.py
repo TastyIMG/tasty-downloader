@@ -312,6 +312,11 @@ def rclone_available():
     return _rclone_platform_supported()
 
 
+def rclone_binary_ready():
+    bundled = _bundled_rclone_path()
+    return bundled.is_file() or bool(shutil.which("rclone"))
+
+
 def rclone_bin_or_install():
     """Return rclone path; install bundled copy only if missing (startup usually did this already)."""
     bundled = _bundled_rclone_path()
@@ -429,6 +434,15 @@ def parse_rclone_progress(line, fallback_total=0):
                 total = int(stats.get("totalBytes") or fallback_total or 0)
                 percent = round(downloaded * 100 / total) if total else None
                 return downloaded, total or None, percent
+            msg = payload.get("msg") or ""
+            if msg and (" / " in msg or "%" in msg):
+                for part in re.split(r"[\r\n]+", msg):
+                    part = part.strip()
+                    if " / " not in part:
+                        continue
+                    nested = parse_rclone_progress(part, fallback_total)
+                    if nested[0] is not None or nested[2] is not None:
+                        return nested
 
     percent = None
     downloaded = None
@@ -503,6 +517,7 @@ def build_rclone_s3_copyto_cmd(r2, src, dest, *, upload=False, file_size=0):
         src,
         dest,
         "-v",
+        "--use-json-log",
         "--s3-no-check-bucket",
         "--s3-chunk-size",
         chunk_size,
@@ -568,7 +583,9 @@ async def run_rclone_with_progress(cmd, fallback_total, request, send_event):
             total = total if total else fallback_total
             if percent is None and total:
                 percent = round(downloaded * 100 / total)
-            await emit_progress(downloaded, total, percent)
+            elif percent is None and downloaded:
+                percent = None
+            await emit_progress(downloaded, total or 0, percent, force=downloaded > 0)
 
     async def drain_buffer(*, final=False):
         nonlocal buffer
@@ -580,6 +597,8 @@ async def run_rclone_with_progress(cmd, fallback_total, request, send_event):
             buffer = ""
 
     try:
+        await emit_progress(0, fallback_total or 0, 0 if fallback_total else None, force=True)
+
         if use_pty:
             master_fd, slave_fd = os.openpty()
             proc = await asyncio.create_subprocess_exec(

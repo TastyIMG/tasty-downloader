@@ -672,7 +672,9 @@ class TastyR2Modal {
     }
 
     progressEl.fill.style.width = downloaded ? "100%" : "0%";
-    progressEl.label.textContent = downloaded ? formatBytes(downloaded) : "Transferring…";
+    progressEl.label.textContent = downloaded
+      ? formatBytes(downloaded)
+      : (total ? `0% · 0 B / ${formatBytes(total)}` : "Transferring…");
   }
 
   parseStreamEvent(line) {

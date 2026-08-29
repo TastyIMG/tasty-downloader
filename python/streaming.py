@@ -22,7 +22,7 @@ async def client_disconnected(request):
 
     transport = getattr(request, "transport", None)
     if transport is None:
-        return True
+        return False
     is_closing = getattr(transport, "is_closing", None)
     if callable(is_closing):
         return bool(is_closing())
