@@ -1,6 +1,7 @@
 config.json
 registry.local.json
 readme.json
-__pycache__/__init__.cpython-312.pyc
-__pycache__/server.cpython-312.pyc
 readme.md
+__pycache__/
+*.py[cod]
+*$py.class

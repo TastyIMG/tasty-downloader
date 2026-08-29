@@ -1,92 +1,27 @@
 import asyncio
 import json
 import os
-from pathlib import Path
 
 import aiohttp
 import folder_paths
 from aiohttp import web
 from server import PromptServer
 
+from .paths import CHUNK_SIZE, LOCAL_REGISTRY_PATH
+from .registry import find_entry, get_registry_path, load_registry
+from .streaming import prepare_ndjson
+
 routes = PromptServer.instance.routes
-EXTENSION_DIR = Path(__file__).parent
-DEFAULT_REGISTRY_PATH = EXTENSION_DIR / "registry.json"
-LOCAL_REGISTRY_PATH = EXTENSION_DIR / "registry.local.json"
-CONFIG_PATH = EXTENSION_DIR / "config.json"
-CHUNK_SIZE = 1024 * 1024
 
 
-def _get_registry_path():
-    env_path = os.environ.get("TASTY_R2_REGISTRY_PATH", "").strip()
-    if env_path:
-        return Path(env_path).expanduser()
-
-    if CONFIG_PATH.exists():
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        custom_path = (cfg.get("registry_path") or "").strip()
-        if custom_path:
-            return Path(custom_path).expanduser()
-
-    return DEFAULT_REGISTRY_PATH
-
-
-def _parse_registry(data):
-    if isinstance(data, dict) and "models" in data:
-        return data["models"]
-    if isinstance(data, list):
-        return data
-    return []
-
-
-def _is_placeholder_entry(entry):
-    """Skip docs/example entries so they never show in the UI."""
-    url = (entry.get("url") or "").lower()
-    filename = (entry.get("filename") or "").lower()
-    if "pub-xxxx" in url or "example.com" in url:
-        return True
-    if filename.startswith("example_"):
-        return True
-    return False
-
-
-def _read_registry_file(path):
-    if not path.exists():
-        return []
-    with open(path, "r", encoding="utf-8") as f:
-        entries = _parse_registry(json.load(f))
-    return [e for e in entries if isinstance(e, dict) and not _is_placeholder_entry(e)]
-
-
-def _load_registry():
-    entries = _read_registry_file(_get_registry_path())
-    local_entries = _read_registry_file(LOCAL_REGISTRY_PATH)
-    if not local_entries:
-        return entries
-
-    by_filename = {entry.get("filename"): entry for entry in entries if entry.get("filename")}
-    for entry in local_entries:
-        filename = entry.get("filename")
-        if filename:
-            by_filename[filename] = entry
-    return list(by_filename.values())
-
-
-def _find_entry(filename):
-    for entry in _load_registry():
-        if entry.get("filename") == filename:
-            return entry
-    return None
-
-
-def _write_chunk(path, data, mode="ab"):
+def write_chunk(path, data, mode="ab"):
     with open(path, mode) as out:
         out.write(data)
 
 
 @routes.get("/tasty-r2/list")
 async def list_models(_request):
-    registry_path = _get_registry_path()
+    registry_path = get_registry_path()
     if not registry_path.exists() and not LOCAL_REGISTRY_PATH.exists():
         return web.json_response(
             {"error": f"Registry not found: {registry_path}"},
@@ -94,7 +29,7 @@ async def list_models(_request):
         )
 
     result = []
-    for entry in _load_registry():
+    for entry in load_registry():
         filename = entry.get("filename")
         save_path = entry.get("save_path")
         url = entry.get("url")
@@ -125,14 +60,14 @@ async def download_model(request):
     if not filename:
         return web.json_response({"error": "filename required"}, status=400)
 
-    registry_path = _get_registry_path()
+    registry_path = get_registry_path()
     if not registry_path.exists() and not LOCAL_REGISTRY_PATH.exists():
         return web.json_response(
             {"error": f"Registry not found: {registry_path}"},
             status=404,
         )
 
-    entry = _find_entry(filename)
+    entry = find_entry(filename)
     if not entry:
         return web.json_response({"error": f"Not in registry: {filename}"}, status=404)
 
@@ -146,27 +81,13 @@ async def download_model(request):
     dest_file = os.path.join(dest_dir, filename)
     temp_file = dest_file + ".partial"
 
-    response = web.StreamResponse(
-        status=200,
-        headers={
-            "Content-Type": "application/x-ndjson",
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
-    await response.prepare(request)
-
-    async def send_event(payload):
-        await response.write((json.dumps(payload) + "\n").encode("utf-8"))
-        await response.drain()
+    response, send_event = await prepare_ndjson(request)
 
     try:
         if os.path.exists(temp_file):
             os.remove(temp_file)
 
-        await send_event(
-            {"type": "progress", "downloaded": 0, "total": 0, "percent": 0}
-        )
+        await send_event({"type": "progress", "downloaded": 0, "total": 0, "percent": 0})
 
         timeout = aiohttp.ClientTimeout(total=None, connect=60, sock_read=300)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -192,7 +113,7 @@ async def download_model(request):
                         raise asyncio.CancelledError("Download cancelled")
                     if not chunk:
                         continue
-                    await asyncio.to_thread(_write_chunk, temp_file, chunk, "ab")
+                    await asyncio.to_thread(write_chunk, temp_file, chunk, "ab")
                     downloaded += len(chunk)
                     percent = round(downloaded * 100 / total) if total else None
                     await send_event(
