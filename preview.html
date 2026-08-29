@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Tasty Models — UI Preview</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #1a1a1a; font-family: sans-serif; }
+    .comfy-bg {
+      padding: 12px 16px; background: #222; border-bottom: 1px solid #444;
+      display: flex; gap: 8px; align-items: center;
+    }
+    .comfy-bg button {
+      background: #333; border: 1px solid #555; color: #ccc;
+      padding: 6px 12px; border-radius: 4px; font-size: 13px;
+    }
+    .comfy-bg button.highlight { border-color: #888; color: #fff; }
+    .hint {
+      position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+      color: #666; font-size: 12px;
+    }
+    .tasty-r2-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .tasty-r2-modal {
+      background: #353535; border: 1px solid #555; border-radius: 8px;
+      min-width: 520px; max-width: 90vw; max-height: 80vh;
+      display: flex; flex-direction: column; color: #ddd;
+    }
+    .tasty-r2-header {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 12px 16px; border-bottom: 1px solid #555;
+    }
+    .tasty-r2-header h2 { margin: 0; font-size: 16px; }
+    .tasty-r2-close { background: none; border: none; color: #aaa; font-size: 20px; cursor: pointer; }
+    .tasty-r2-body { overflow-y: auto; padding: 4px 0 8px; }
+    .tasty-r2-section { border-bottom: 1px solid #444; }
+    .tasty-r2-section-header {
+      display: flex; align-items: center; gap: 8px; width: 100%;
+      padding: 10px 16px; background: #3a3a3a; border: none;
+      color: #eee; font-size: 13px; font-weight: 600; text-align: left; cursor: pointer;
+    }
+    .tasty-r2-section-header:hover { background: #404040; }
+    .tasty-r2-chevron { color: #999; font-size: 11px; width: 12px; }
+    .tasty-r2-section-title { flex: 1; text-transform: capitalize; }
+    .tasty-r2-section-meta { color: #999; font-size: 12px; font-weight: normal; }
+    .tasty-r2-section-body { display: none; }
+    .tasty-r2-section.open .tasty-r2-section-body { display: block; }
+    .tasty-r2-row {
+      display: grid; grid-template-columns: 1fr 90px; gap: 8px; align-items: center;
+      padding: 8px 16px 8px 36px; border-bottom: 1px solid #3a3a3a; font-size: 13px;
+    }
+    .tasty-r2-row:hover { background: #3a3a3a; }
+    .tasty-r2-for { font-weight: 500; }
+    .tasty-r2-filename { color: #999; font-size: 11px; }
+    .tasty-r2-btn {
+      background: #444; border: 1px solid #666; color: #eee;
+      padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="comfy-bg">
+    <button>Queue</button>
+    <button>Manager</button>
+    <button class="highlight">Tasty Models</button>
+    <button>Settings</button>
+  </div>
+
+  <div class="tasty-r2-overlay">
+    <div class="tasty-r2-modal">
+      <div class="tasty-r2-header">
+        <h2>Tasty Models</h2>
+        <button class="tasty-r2-close" type="button">&times;</button>
+      </div>
+      <div class="tasty-r2-body">
+        <div class="tasty-r2-section open">
+          <button type="button" class="tasty-r2-section-header" onclick="toggle(this)">
+            <span class="tasty-r2-chevron">▼</span>
+            <span class="tasty-r2-section-title">checkpoints</span>
+            <span class="tasty-r2-section-meta">2</span>
+          </button>
+          <div class="tasty-r2-section-body">
+            <div class="tasty-r2-row">
+              <div>
+                <div class="tasty-r2-for">Flux 1 Dev</div>
+                <div class="tasty-r2-filename">flux1-dev-fp8.safetensors</div>
+              </div>
+              <button class="tasty-r2-btn">Download</button>
+            </div>
+            <div class="tasty-r2-row">
+              <div>
+                <div class="tasty-r2-for">SDXL Base</div>
+                <div class="tasty-r2-filename">sd_xl_base_1.0.safetensors</div>
+              </div>
+              <button class="tasty-r2-btn">Download</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="tasty-r2-section open">
+          <button type="button" class="tasty-r2-section-header" onclick="toggle(this)">
+            <span class="tasty-r2-chevron">▼</span>
+            <span class="tasty-r2-section-title">loras</span>
+            <span class="tasty-r2-section-meta">2</span>
+          </button>
+          <div class="tasty-r2-section-body">
+            <div class="tasty-r2-row">
+              <div>
+                <div class="tasty-r2-for">Flux 1 Dev — Anime Style</div>
+                <div class="tasty-r2-filename">anime_style_v2.safetensors</div>
+              </div>
+              <button class="tasty-r2-btn">Download</button>
+            </div>
+            <div class="tasty-r2-row">
+              <div>
+                <div class="tasty-r2-for">SDXL — Lighting Boost</div>
+                <div class="tasty-r2-filename">lighting_boost.safetensors</div>
+              </div>
+              <button class="tasty-r2-btn">Download</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="tasty-r2-section">
+          <button type="button" class="tasty-r2-section-header" onclick="toggle(this)">
+            <span class="tasty-r2-chevron">▶</span>
+            <span class="tasty-r2-section-title">vae</span>
+            <span class="tasty-r2-section-meta">1</span>
+          </button>
+          <div class="tasty-r2-section-body">
+            <div class="tasty-r2-row">
+              <div>
+                <div class="tasty-r2-for">Flux 1 Dev — VAE</div>
+                <div class="tasty-r2-filename">ae.safetensors</div>
+              </div>
+              <button class="tasty-r2-btn">Download</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="tasty-r2-section">
+          <button type="button" class="tasty-r2-section-header" onclick="toggle(this)">
+            <span class="tasty-r2-chevron">▶</span>
+            <span class="tasty-r2-section-title">clip</span>
+            <span class="tasty-r2-section-meta">1</span>
+          </button>
+          <div class="tasty-r2-section-body">
+            <div class="tasty-r2-row">
+              <div>
+                <div class="tasty-r2-for">Flux 1 Dev — T5</div>
+                <div class="tasty-r2-filename">t5xxl_fp16.safetensors</div>
+              </div>
+              <button class="tasty-r2-btn">Download</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <p class="hint">R2 catalog only — click section headers to expand/collapse</p>
+  <script>
+    function toggle(header) {
+      const section = header.parentElement;
+      section.classList.toggle("open");
+      header.querySelector(".tasty-r2-chevron").textContent =
+        section.classList.contains("open") ? "▼" : "▶";
+    }
+  </script>
+</body>
+</html>
