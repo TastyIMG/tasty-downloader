@@ -9,13 +9,13 @@ Set up **ComfyUI Tasty R2 Downloader** so Download and Push work:
 1. Find the extension folder
 2. Install `rclone` if missing
 3. Resolve Cloudflare account + R2 credentials via CLI / env (not manual Q&A)
-4. Write gitignored `config.json`
+4. Write gitignored `config.json` (credentials + personal `models`)
 5. Create the rclone remote and test `lsd`
-6. Sync `registry.local.json` via one-liner replace if the user has a hosted copy (see below)
+6. Sync hosted `config.json` via one-liner if the user has a Config URL (see below)
 7. Tell the user to restart ComfyUI
-8. Warn that Push only appends locally — they must re-host `registry.local.json` after Push until dynamic R2 registry sync exists
+8. Warn that Push only appends locally — they must re-host `config.json` after Push until dynamic R2 sync exists
 
-Do **not** commit `config.json`, `registry.local.json`, or secrets. Do not echo secrets in full if avoidable.
+Do **not** commit `config.json` or secrets. Do not echo secrets in full if avoidable.
 
 ## Locate the extension
 
@@ -124,6 +124,7 @@ ext = os.environ["EXT"]
 account = os.environ["CF_ACCOUNT_ID"]
 cfg = {
   "registry_path": "",
+  "models": [],
   "r2": {
     "account_id": account,
     "access_key_id": os.environ["CF_R2_ACCESS_KEY_ID"],
@@ -131,6 +132,7 @@ cfg = {
     "bucket": os.environ["CF_R2_BUCKET"],
     "endpoint": f"https://{account}.r2.cloudflarestorage.com",
     "public_base_url": os.environ["CF_R2_PUBLIC_BASE_URL"].rstrip("/"),
+    "config_url": os.environ.get("TASTY_R2_CONFIG_URL", ""),
     "remote_name": "tasty-r2",
     "chunk_size": "64M",
     "upload_concurrency": 8,
@@ -185,33 +187,25 @@ rclone lsd "${RCLONE_REMOTE}:${CF_R2_BUCKET}"
 
 If `lsd` fails, fix credentials/endpoint before declaring success.
 
-## Sync personal registry (one-liner replace)
+## Sync config (one file)
 
-`registry.local.json` is **local-only** after Push. It is not uploaded to R2 automatically. New machines / reinstalls need the user to **download and replace** their hosted copy.
-
-One-liner (user supplies their own URL — never commit personal URLs):
+`config.json` holds credentials, settings, and personal `models`. Host that single file; save **Config URL** in Settings.
 
 ```bash
-curl -fsSL "$TASTY_R2_LOCAL_REGISTRY_URL" -o "$EXT/registry.local.json"
+export TASTY_R2_CONFIG_URL="https://pub-xxxx.r2.dev/path/config.json"
+bash "$EXT/scripts/sync-local-registry.sh"
 ```
 
 Or:
 
 ```bash
-curl -fsSL "https://pub-xxxx.r2.dev/path/to/registry.local.json" -o "$EXT/registry.local.json"
-python3 -m json.tool "$EXT/registry.local.json" >/dev/null
+curl -fsSL "$TASTY_R2_CONFIG_URL" -o "$EXT/config.json"
+python3 -m json.tool "$EXT/config.json" >/dev/null
 ```
 
-Helper script (same overwrite behavior):
+**Sync problem:** Push/Settings stay local until the user re-uploads `config.json` to the Config URL. Overwriting with a stale hosted copy wipes newer local rows.
 
-```bash
-export TASTY_R2_LOCAL_REGISTRY_URL="https://pub-xxxx.r2.dev/path/to/registry.local.json"
-bash "$EXT/scripts/sync-local-registry.sh"
-```
-
-**Sync problem:** Push appends on the box only. If the user later runs the one-liner against an **old** hosted file, those Push rows are wiped. After Pushing, they must re-upload the updated `registry.local.json` to their R2 public path.
-
-**Future:** registry should be dynamic and read/write from the **user’s** R2 (configured public base / object path), not a manual curl replace loop. Not implemented yet — document only.
+**Future:** dynamic read/write of config from the user’s R2. Not implemented yet — document only.
 
 ## Verify
 
@@ -229,10 +223,10 @@ Tell the user:
 
 1. Restart ComfyUI
 2. Open **Tasty Downloader** — Settings should show credentials as saved
-3. **Push** uploads to `{bucket}/models/{save_path}/{filename}` and appends **local** `registry.local.json` only
+3. **Push** uploads to `{bucket}/models/{save_path}/{filename}` and appends into **local** `config.json` `models`
 4. **Download** uses registry URLs under `public_base_url`
-5. If they use a hosted registry, remind them to re-upload `registry.local.json` after Push, or the next one-liner replace will overwrite newer entries
-6. Note the planned direction: dynamic registry read/write from the user’s R2 (not done yet)
+5. If they use a hosted config, remind them to re-upload `config.json` after Push/Settings, or the next one-liner replace will overwrite newer entries
+6. Note the planned direction: dynamic config read/write from the user’s R2 (not done yet)
 
 ## Do not
 

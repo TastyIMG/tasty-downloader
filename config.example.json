@@ -1,13 +1,21 @@
 {
   "registry_path": "",
+  "models": [],
+  "_example_models": [
+    {
+      "for_model": "Example Model",
+      "filename": "example_model.safetensors",
+      "save_path": "diffusion_models",
+      "url": "https://pub-xxxx.r2.dev/models/diffusion_models/example_model.safetensors"
+    }
+  ],
   "r2": {
     "account_id": "",
     "access_key_id": "",
     "secret_access_key": "",
     "bucket": "your-r2-bucket",
     "endpoint": "",
-    "public_base_url": "",
-    "registry_url": "",
+    "public_base_url": "https://pub-xxxx.r2.dev",
     "remote_name": "tasty-r2",
     "chunk_size": "64M",
     "upload_concurrency": 8,
@@ -23,6 +31,7 @@
       "checkpoints",
       "embeddings",
       "hypernetworks"
-    ]
+    ],
+    "config_url": "https://pub-xxxx.r2.dev/path/config.json"
   }
 }
