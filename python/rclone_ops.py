@@ -73,13 +73,32 @@ def _rclone_platform_supported():
     return _platform_archive_suffix() is not None
 
 
-def _rclone_download_url():
+def _rclone_download_urls():
     suffix = _platform_archive_suffix()
     if not suffix:
         raise RuntimeError(
             f"Unsupported platform for bundled rclone: {platform.system()} {platform.machine()}"
         )
-    return f"https://downloads.rclone.org/rclone-{RCLONE_VERSION}-{suffix}.zip"
+    return [
+        f"https://downloads.rclone.org/rclone-current-{suffix}.zip",
+        f"https://downloads.rclone.org/{RCLONE_VERSION}/rclone-{RCLONE_VERSION}-{suffix}.zip",
+    ]
+
+
+def _download_bundled_rclone(bundled, zip_path):
+    last_error = None
+    for url in _rclone_download_urls():
+        try:
+            with urllib.request.urlopen(url, timeout=120) as resp, open(zip_path, "wb") as out:
+                shutil.copyfileobj(resp, out)
+            _extract_rclone_from_zip(zip_path, bundled)
+            _mark_executable(bundled)
+            return
+        except Exception as exc:
+            last_error = exc
+            if zip_path.exists():
+                zip_path.unlink(missing_ok=True)
+    raise RuntimeError(f"Failed to download rclone: {last_error}")
 
 
 def _mark_executable(path):
@@ -110,10 +129,11 @@ def ensure_rclone_binary():
         _mark_executable(bundled)
         return str(bundled)
 
+    system_path = shutil.which("rclone")
+    if system_path:
+        return system_path
+
     if not _rclone_platform_supported():
-        system_path = shutil.which("rclone")
-        if system_path:
-            return system_path
         raise RuntimeError(
             f"rclone is not available on {platform.system()} {platform.machine()}"
         )
@@ -123,14 +143,14 @@ def ensure_rclone_binary():
             _mark_executable(bundled)
             return str(bundled)
 
+        system_path = shutil.which("rclone")
+        if system_path:
+            return system_path
+
         RCLONE_BIN_DIR.mkdir(parents=True, exist_ok=True)
-        url = _rclone_download_url()
         zip_path = RCLONE_BIN_DIR / "rclone-download.zip"
         try:
-            with urllib.request.urlopen(url, timeout=120) as resp, open(zip_path, "wb") as out:
-                shutil.copyfileobj(resp, out)
-            _extract_rclone_from_zip(zip_path, bundled)
-            _mark_executable(bundled)
+            _download_bundled_rclone(bundled, zip_path)
         finally:
             if zip_path.exists():
                 zip_path.unlink(missing_ok=True)
