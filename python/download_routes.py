@@ -49,6 +49,8 @@ async def download_via_http(url, temp_file, request, send_event):
     timeout = aiohttp.ClientTimeout(total=None, connect=60, sock_read=300)
     last_progress_at = 0.0
 
+    await send_event({"type": "progress", "downloaded": 0, "total": 0, "percent": 0})
+
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.get(url) as resp:
             if resp.status >= 400:
@@ -90,23 +92,17 @@ async def download_via_http(url, temp_file, request, send_event):
 
 
 async def download_via_rclone(r2, save_path, filename, url, temp_file, request, send_event):
-    from .rclone_ops import rclone_bin_or_install
+    from .rclone_ops import rclone_bin_or_install, rclone_binary_ready
 
-    await asyncio.to_thread(rclone_bin_or_install)
+    await send_event({"type": "progress", "downloaded": 0, "total": 0, "percent": 0})
+
+    if not rclone_binary_ready():
+        await asyncio.to_thread(rclone_bin_or_install)
+
     object_key = r2_model_object_key(save_path, filename)
     src = rclone_s3_uri(r2, object_key)
-    file_size = await url_content_length(url)
-    if file_size:
-        await send_event(
-            {
-                "type": "progress",
-                "downloaded": 0,
-                "total": file_size,
-                "percent": 0,
-            }
-        )
     cmd = build_rclone_s3_copyto_cmd(r2, src, temp_file, upload=False)
-    await run_rclone_with_progress(cmd, file_size, request, send_event)
+    await run_rclone_with_progress(cmd, 0, request, send_event)
 
 
 @routes.get("/tasty-r2/list")
