@@ -246,6 +246,9 @@ const styles = `
   flex-direction: column;
   gap: 4px;
 }
+.tasty-r2-field[hidden] {
+  display: none !important;
+}
 .tasty-r2-field label {
   font-size: 12px;
   color: #bbb;
@@ -268,10 +271,25 @@ const styles = `
   display: flex;
   gap: 8px;
   margin-top: 4px;
+  flex-wrap: wrap;
 }
 .tasty-r2-settings-actions .tasty-r2-btn {
   width: auto;
   padding: 6px 14px;
+}
+.tasty-r2-config-url-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.tasty-r2-config-url-row input {
+  flex: 1;
+  min-width: 0;
+}
+.tasty-r2-config-url-row .tasty-r2-btn {
+  width: auto;
+  flex-shrink: 0;
+  padding: 6px 12px;
 }
 .tasty-r2-hint {
   font-size: 11px;
@@ -862,12 +880,23 @@ class TastyR2Modal {
 
   renderSettings(data) {
     const folders = (data.push_folders || []).join(", ");
+    const modelsNote =
+      typeof data.models_count === "number"
+        ? `<div class="tasty-r2-hint">${data.models_count} personal model(s) in local config.json</div>`
+        : "";
     this.body.innerHTML = `
       <form class="tasty-r2-settings">
         <div class="tasty-r2-hint">
-          Credentials are saved to this machine's gitignored <code>config.json</code>
-          and used to configure rclone (64MB multipart chunks).
+          Paste your hosted <code>config.json</code> URL and hit <strong>Load</strong> — credentials and models fill in automatically.
           ${data.rclone_available ? "" : "<br><strong>rclone is not installed.</strong>"}
+        </div>
+        <div class="tasty-r2-field">
+          <label>Config URL</label>
+          <div class="tasty-r2-config-url-row">
+            <input name="config_url" value="${this.escapeAttr(data.config_url || "")}" placeholder="https://pub-….r2.dev/path/config.json" />
+            <button class="tasty-r2-btn" type="button" data-action="pull">Load</button>
+          </div>
+          ${modelsNote}
         </div>
         <div class="tasty-r2-field">
           <label>Account ID</label>
@@ -893,11 +922,6 @@ class TastyR2Modal {
           <label>Public base URL</label>
           <input name="public_base_url" value="${this.escapeAttr(data.public_base_url || "")}" placeholder="https://pub-….r2.dev" />
         </div>
-        <div class="tasty-r2-field">
-          <label>Config URL</label>
-          <input name="config_url" value="${this.escapeAttr(data.config_url || "")}" placeholder="https://pub-….r2.dev/path/config.json" />
-          <div class="tasty-r2-hint">One hosted <code>config.json</code> — credentials, settings, and personal models. Sync that single file on a new box.</div>
-        </div>
         <div class="tasty-r2-field" hidden>
           <label>Push folders (comma-separated)</label>
           <textarea name="push_folders">${this.escapeText(folders)}</textarea>
@@ -917,6 +941,37 @@ class TastyR2Modal {
     const form = this.body.querySelector("form");
     const status = this.body.querySelector("[data-status]");
     const testBtn = this.body.querySelector('[data-action="test"]');
+    const pullBtn = this.body.querySelector('[data-action="pull"]');
+    const configUrlInput = form.querySelector('[name="config_url"]');
+
+    const pullFromUrl = async () => {
+      this.setError("");
+      const config_url = (configUrlInput.value || "").trim();
+      if (!config_url) {
+        this.setError("Paste a Config URL first");
+        return;
+      }
+      status.textContent = "Loading config from URL...";
+      try {
+        const resp = await api.fetchApi("/tasty-r2/settings/pull", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ config_url }),
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.ok === false) {
+          throw new Error(data.error || "Pull failed");
+        }
+        this.renderSettings(data);
+        const st = this.body.querySelector("[data-status]");
+        if (st) {
+          st.textContent = `Loaded. ${data.models_count || 0} models · fields populated.`;
+        }
+      } catch (err) {
+        status.textContent = "";
+        this.setError(String(err.message || err));
+      }
+    };
 
     const submit = async (test) => {
       this.setError("");
@@ -944,9 +999,11 @@ class TastyR2Modal {
         if (!resp.ok || data.ok === false) {
           throw new Error(data.error || "Save failed");
         }
-        status.textContent = test ? "Saved. Connection OK." : "Saved.";
-        form.querySelector('[name="access_key_id"]').value = "";
-        form.querySelector('[name="secret_access_key"]').value = "";
+        this.renderSettings(data);
+        const st = this.body.querySelector("[data-status]");
+        if (st) {
+          st.textContent = test ? "Saved. Connection OK." : "Saved.";
+        }
       } catch (err) {
         status.textContent = "";
         this.setError(String(err.message || err));
@@ -958,6 +1015,10 @@ class TastyR2Modal {
       submit(false);
     };
     testBtn.onclick = () => submit(true);
+    pullBtn.onclick = () => pullFromUrl();
+    configUrlInput.addEventListener("change", () => {
+      if ((configUrlInput.value || "").trim()) pullFromUrl();
+    });
   }
 
   escapeAttr(value) {
@@ -983,11 +1044,13 @@ function openTastyDownloader() {
 app.registerExtension({
   name: "Comfy.TastyR2Downloader",
   init() {
-    if (document.getElementById("tasty-r2-styles")) return;
-    const el = document.createElement("style");
-    el.id = "tasty-r2-styles";
+    let el = document.getElementById("tasty-r2-styles");
+    if (!el) {
+      el = document.createElement("style");
+      el.id = "tasty-r2-styles";
+      document.head.appendChild(el);
+    }
     el.textContent = styles;
-    document.head.appendChild(el);
   },
   commands: [
     {
