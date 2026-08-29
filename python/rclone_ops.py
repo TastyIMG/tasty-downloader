@@ -1,15 +1,26 @@
+import asyncio
 import json
 import os
+import platform
 import re
 import shutil
+import stat
 import subprocess
+import threading
+import urllib.request
+import zipfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 import folder_paths
 
 from .config_store import get_r2_config
-from .paths import DEFAULT_PUSH_FOLDERS
-from .registry import registry_filenames
+from .paths import DEFAULT_PUSH_FOLDERS, EXTENSION_DIR
+from .streaming import client_disconnected
+
+RCLONE_BIN_DIR = EXTENSION_DIR / "bin"
+RCLONE_VERSION = "v1.68.2"
+_install_lock = threading.Lock()
 
 PERCENT_RE = re.compile(r",\s*(\d+(?:\.\d+)?)%")
 BYTES_RE = re.compile(
@@ -30,17 +41,115 @@ def run_cmd(cmd, timeout=60):
     )
 
 
-def rclone_bin():
-    path = shutil.which("rclone")
-    if not path:
+def _rclone_exe_name():
+    return "rclone.exe" if platform.system() == "Windows" else "rclone"
+
+
+def _bundled_rclone_path():
+    return RCLONE_BIN_DIR / _rclone_exe_name()
+
+
+def _platform_archive_suffix():
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    if machine in ("x86_64", "amd64"):
+        arch = "amd64"
+    elif machine in ("aarch64", "arm64"):
+        arch = "arm64"
+    elif machine in ("i386", "i686", "x86"):
+        arch = "386"
+    else:
+        return None
+    if system == "linux":
+        return f"linux-{arch}"
+    if system == "darwin":
+        return f"osx-{arch}"
+    if system == "windows":
+        return f"windows-{arch}"
+    return None
+
+
+def _rclone_platform_supported():
+    return _platform_archive_suffix() is not None
+
+
+def _rclone_download_url():
+    suffix = _platform_archive_suffix()
+    if not suffix:
         raise RuntimeError(
-            "rclone not found on PATH. Install with: curl -fsSL https://rclone.org/install.sh | sudo bash"
+            f"Unsupported platform for bundled rclone: {platform.system()} {platform.machine()}"
         )
-    return path
+    return f"https://downloads.rclone.org/rclone-{RCLONE_VERSION}-{suffix}.zip"
+
+
+def _mark_executable(path):
+    mode = path.stat().st_mode
+    path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def _extract_rclone_from_zip(zip_path, dest_path):
+    with zipfile.ZipFile(zip_path) as archive:
+        member = None
+        target_name = _rclone_exe_name()
+        for name in archive.namelist():
+            base = name.rsplit("/", 1)[-1]
+            if base == target_name or base == "rclone":
+                member = name
+                break
+        if not member:
+            raise RuntimeError("rclone binary not found inside downloaded archive")
+        with archive.open(member) as src, open(dest_path, "wb") as out:
+            shutil.copyfileobj(src, out)
+
+
+def ensure_rclone_binary():
+    bundled = _bundled_rclone_path()
+    if bundled.is_file():
+        if os.access(bundled, os.X_OK):
+            return str(bundled)
+        _mark_executable(bundled)
+        return str(bundled)
+
+    if not _rclone_platform_supported():
+        system_path = shutil.which("rclone")
+        if system_path:
+            return system_path
+        raise RuntimeError(
+            f"rclone is not available on {platform.system()} {platform.machine()}"
+        )
+
+    with _install_lock:
+        if bundled.is_file():
+            _mark_executable(bundled)
+            return str(bundled)
+
+        RCLONE_BIN_DIR.mkdir(parents=True, exist_ok=True)
+        url = _rclone_download_url()
+        zip_path = RCLONE_BIN_DIR / "rclone-download.zip"
+        try:
+            with urllib.request.urlopen(url, timeout=120) as resp, open(zip_path, "wb") as out:
+                shutil.copyfileobj(resp, out)
+            _extract_rclone_from_zip(zip_path, bundled)
+            _mark_executable(bundled)
+        finally:
+            if zip_path.exists():
+                zip_path.unlink(missing_ok=True)
+
+        if not bundled.is_file():
+            raise RuntimeError("Failed to install bundled rclone")
+        return str(bundled)
 
 
 def rclone_available():
-    return bool(shutil.which("rclone"))
+    if _bundled_rclone_path().is_file():
+        return True
+    if shutil.which("rclone"):
+        return True
+    return _rclone_platform_supported()
+
+
+def rclone_bin():
+    return ensure_rclone_binary()
 
 
 def ensure_rclone_remote(r2):
@@ -201,3 +310,151 @@ def split_rclone_output(buffer: str):
     incomplete = parts.pop() if parts else ""
     lines = [p.strip() for p in parts if p.strip()]
     return lines, incomplete
+
+
+def r2_model_object_key(save_path: str, filename: str) -> str:
+    sp = save_path.replace("\\", "/").strip("/")
+    return f"models/{sp}/{filename}"
+
+
+def prefer_rclone_download(r2, url: str) -> bool:
+    """Use bucket S3 API when creds exist; keep plain HTTP for obvious external hosts."""
+    if not rclone_available():
+        return False
+    if not r2.get("access_key_id") or not r2.get("secret_access_key") or not r2.get("bucket"):
+        return False
+    if not (r2.get("endpoint") or r2.get("account_id")):
+        return False
+    if not url:
+        return True
+
+    host = urlparse(url).netloc.lower()
+    if "huggingface.co" in host or host == "hf.co" or host.endswith(".hf.co"):
+        return False
+    if "civitai.com" in host:
+        return False
+
+    base = (r2.get("public_base_url") or "").rstrip("/")
+    if base and url.startswith(f"{base}/"):
+        return True
+    if "r2.dev" in host or "cloudflarestorage.com" in host:
+        return True
+    return False
+
+
+def build_rclone_s3_copyto_cmd(r2, src, dest, *, upload=False):
+    rclone = rclone_bin()
+    cmd = [
+        rclone,
+        "copyto",
+        src,
+        dest,
+        "-v",
+        "--s3-no-check-bucket",
+        "--s3-chunk-size",
+        str(r2.get("chunk_size") or "64M"),
+        "--progress",
+        "--stats",
+        "1s",
+        "--stats-one-line",
+    ]
+    if upload:
+        cmd.extend(
+            [
+                "--s3-upload-concurrency",
+                str(r2.get("upload_concurrency") or 8),
+            ]
+        )
+    return cmd
+
+
+async def run_rclone_with_progress(cmd, fallback_total, request, send_event):
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+    assert proc.stdout is not None
+    buffer = ""
+    last_downloaded = 0
+    log_tail = []
+
+    def remember(line: str):
+        log_tail.append(line)
+        if len(log_tail) > 40:
+            del log_tail[:-40]
+
+    try:
+        while True:
+            if await client_disconnected(request):
+                raise asyncio.CancelledError("Transfer cancelled")
+
+            chunk = await proc.stdout.read(4096)
+            if not chunk:
+                break
+
+            buffer += chunk.decode("utf-8", errors="replace")
+            lines, buffer = split_rclone_output(buffer)
+
+            for text in lines:
+                remember(text)
+                downloaded, total, percent = parse_rclone_progress(text, fallback_total)
+                if downloaded is None and percent is None:
+                    continue
+                if downloaded is None:
+                    downloaded = last_downloaded
+                else:
+                    last_downloaded = downloaded
+                total = total if total else fallback_total
+                if percent is None and total:
+                    percent = round(downloaded * 100 / total)
+                await send_event(
+                    {
+                        "type": "progress",
+                        "downloaded": downloaded,
+                        "total": total,
+                        "percent": percent,
+                    }
+                )
+
+        if buffer.strip():
+            remember(buffer.strip())
+            downloaded, total, percent = parse_rclone_progress(buffer, fallback_total)
+            if downloaded is not None or percent is not None:
+                if downloaded is None:
+                    downloaded = last_downloaded
+                total = total if total else fallback_total
+                if percent is None and total:
+                    percent = round(downloaded * 100 / total)
+                await send_event(
+                    {
+                        "type": "progress",
+                        "downloaded": downloaded,
+                        "total": total,
+                        "percent": percent,
+                    }
+                )
+
+        code = await proc.wait()
+        if code != 0:
+            interesting = [
+                line
+                for line in log_tail
+                if any(
+                    needle in line.lower()
+                    for needle in ("error", "failed", "denied", "forbidden", "404", "403", "401")
+                )
+            ]
+            detail = " | ".join(interesting[-5:] or log_tail[-5:] or ["(no rclone output)"])
+            raise RuntimeError(f"rclone exited with code {code}: {detail}")
+
+        return last_downloaded or fallback_total or 0
+    except asyncio.CancelledError:
+        if proc.returncode is None:
+            proc.terminate()
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+        raise

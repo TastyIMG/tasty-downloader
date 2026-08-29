@@ -498,7 +498,7 @@ class TastyR2Modal {
       if (!resp.ok) throw new Error(data.error || "Failed to load push list");
 
       if (!data.rclone_available) {
-        this.body.innerHTML = `<div class="tasty-r2-empty">rclone is not installed on this machine.<br>Install it, then reopen this tab.</div>`;
+        this.body.innerHTML = `<div class="tasty-r2-empty">rclone is not supported on this OS/arch.</div>`;
         return;
       }
       if (!data.configured) {
@@ -914,7 +914,7 @@ class TastyR2Modal {
       <form class="tasty-r2-settings">
         <div class="tasty-r2-hint">
           Paste your hosted URL <em>or</em> the full <code>config.json</code> contents, then hit <strong>Load</strong>.
-          ${data.rclone_available ? "" : "<br><strong>rclone is not installed.</strong>"}
+          ${data.rclone_available ? "" : "<br><strong>rclone is not supported on this OS/arch.</strong>"}
         </div>
         <div class="tasty-r2-field">
           <label>Config URL</label>

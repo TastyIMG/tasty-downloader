@@ -1,3 +1,4 @@
+bin/
 config.json
 registry.local.json
 remote-config-check.json
