@@ -474,6 +474,19 @@ def split_rclone_output(buffer: str):
     return lines, incomplete
 
 
+def progress_file_size(progress_path: str) -> int:
+    """Size of growing download target (and rclone's nested ``.partial`` if any)."""
+    candidates = [progress_path, progress_path + ".partial"]
+    best = 0
+    for path in candidates:
+        try:
+            if os.path.isfile(path):
+                best = max(best, os.path.getsize(path))
+        except OSError:
+            continue
+    return best
+
+
 def r2_model_object_key(save_path: str, filename: str) -> str:
     sp = save_path.replace("\\", "/").strip("/")
     return f"models/{sp}/{filename}"
@@ -538,10 +551,33 @@ def build_rclone_s3_copyto_cmd(r2, src, dest, *, upload=False, file_size=0):
                 "10",
             ]
         )
+    else:
+        # Write straight to dest so size polling works (default .partial rename hides growth).
+        cmd.extend(
+            [
+                "--inplace",
+                "--multi-thread-streams",
+                "0",
+            ]
+        )
     return cmd
 
 
-async def run_rclone_with_progress(cmd, fallback_total, request, send_event):
+async def run_rclone_with_progress(
+    cmd,
+    fallback_total,
+    request,
+    send_event,
+    *,
+    progress_path=None,
+    total_task=None,
+):
+    """Run rclone and stream progress.
+
+    When ``progress_path`` is set (download ``*.partial``), progress is driven by
+    polling that file's size — independent of rclone stdout buffering/TTY quirks.
+    rclone log lines still update progress when parseable (e.g. Push uploads).
+    """
     cmd = line_buffered_cmd(list(cmd))
     use_pty = platform.system().lower() != "windows" and hasattr(os, "openpty")
 
@@ -549,8 +585,10 @@ async def run_rclone_with_progress(cmd, fallback_total, request, send_event):
     proc = None
     buffer = ""
     last_downloaded = 0
+    known_total = int(fallback_total or 0)
     last_emit_at = 0.0
     log_tail = []
+    poll_task = None
 
     async def emit_progress(downloaded, total, percent, *, force=False):
         nonlocal last_emit_at
@@ -567,25 +605,34 @@ async def run_rclone_with_progress(cmd, fallback_total, request, send_event):
             }
         )
 
-    async def handle_lines(lines):
+    async def emit_bytes(downloaded, *, force=False):
         nonlocal last_downloaded
+        if downloaded < last_downloaded and not force:
+            return
+        last_downloaded = downloaded
+        total = known_total
+        percent = round(downloaded * 100 / total) if total else None
+        await emit_progress(downloaded, total or 0, percent, force=force or downloaded > 0)
+
+    async def handle_lines(lines):
+        nonlocal known_total
         for text in lines:
             log_tail.append(text)
             if len(log_tail) > 40:
                 del log_tail[:-40]
-            downloaded, total, percent = parse_rclone_progress(text, fallback_total)
+            # File-size polling is authoritative for downloads; still collect errors.
+            if progress_path:
+                continue
+            downloaded, total, percent = parse_rclone_progress(text, known_total)
             if downloaded is None and percent is None:
                 continue
+            if total:
+                known_total = int(total)
             if downloaded is None:
                 downloaded = last_downloaded
-            else:
-                last_downloaded = downloaded
-            total = total if total else fallback_total
-            if percent is None and total:
-                percent = round(downloaded * 100 / total)
-            elif percent is None and downloaded:
-                percent = None
-            await emit_progress(downloaded, total or 0, percent, force=downloaded > 0)
+            if percent is None and known_total:
+                percent = round(downloaded * 100 / known_total)
+            await emit_bytes(downloaded, force=downloaded > 0)
 
     async def drain_buffer(*, final=False):
         nonlocal buffer
@@ -596,8 +643,31 @@ async def run_rclone_with_progress(cmd, fallback_total, request, send_event):
             await handle_lines([buffer.strip()])
             buffer = ""
 
+    async def poll_progress_path():
+        """Drive UI from growing local file — works even when rclone stdout is silent."""
+        nonlocal known_total
+        total_resolved = False
+        while True:
+            if await client_disconnected(request):
+                raise asyncio.CancelledError("Transfer cancelled")
+            if not total_resolved and total_task is not None and total_task.done():
+                total_resolved = True
+                try:
+                    resolved = int(total_task.result() or 0)
+                    if resolved > known_total:
+                        known_total = resolved
+                except Exception:
+                    pass
+            if progress_path:
+                size = progress_file_size(progress_path)
+                if size != last_downloaded:
+                    await emit_bytes(size, force=True)
+            if proc is not None and proc.returncode is not None:
+                break
+            await asyncio.sleep(PROGRESS_EMIT_INTERVAL_SEC)
+
     try:
-        await emit_progress(0, fallback_total or 0, 0 if fallback_total else None, force=True)
+        await emit_progress(0, known_total or 0, 0 if known_total else None, force=True)
 
         if use_pty:
             master_fd, slave_fd = os.openpty()
@@ -609,6 +679,17 @@ async def run_rclone_with_progress(cmd, fallback_total, request, send_event):
                 close_fds=True,
             )
             os.close(slave_fd)
+        else:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+
+        if progress_path or total_task is not None:
+            poll_task = asyncio.create_task(poll_progress_path())
+
+        if use_pty:
             loop = asyncio.get_running_loop()
             while True:
                 if await client_disconnected(request):
@@ -620,11 +701,6 @@ async def run_rclone_with_progress(cmd, fallback_total, request, send_event):
                     buffer += chunk.decode("utf-8", errors="replace")
                     await drain_buffer()
         else:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
             assert proc.stdout is not None
             while True:
                 if await client_disconnected(request):
@@ -638,6 +714,13 @@ async def run_rclone_with_progress(cmd, fallback_total, request, send_event):
         await drain_buffer(final=True)
 
         code = await proc.wait()
+
+        # Final size from partial file if we were polling it
+        if progress_path:
+            size = progress_file_size(progress_path)
+            if size:
+                await emit_bytes(size, force=True)
+
         if code != 0:
             detail = format_rclone_failure(log_tail)
             hint = ""
@@ -649,10 +732,17 @@ async def run_rclone_with_progress(cmd, fallback_total, request, send_event):
                 )
             raise RuntimeError(f"rclone exited with code {code}: {detail}{hint}")
 
-        if fallback_total and last_downloaded < fallback_total:
-            await emit_progress(fallback_total, fallback_total, 100, force=True)
+        if known_total and last_downloaded < known_total:
+            await emit_progress(known_total, known_total, 100, force=True)
+        elif last_downloaded:
+            await emit_progress(
+                last_downloaded,
+                known_total or last_downloaded,
+                100 if known_total else None,
+                force=True,
+            )
 
-        return last_downloaded or fallback_total or 0
+        return last_downloaded or known_total or 0
     except asyncio.CancelledError:
         if proc and proc.returncode is None:
             proc.terminate()
@@ -662,6 +752,12 @@ async def run_rclone_with_progress(cmd, fallback_total, request, send_event):
                 pass
         raise
     finally:
+        if poll_task is not None:
+            poll_task.cancel()
+            try:
+                await poll_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if master_fd is not None:
             try:
                 os.close(master_fd)
