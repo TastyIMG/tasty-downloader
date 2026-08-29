@@ -2,8 +2,8 @@ import json
 import os
 from pathlib import Path
 
+import aiohttp
 import folder_paths
-import requests
 from aiohttp import web
 from server import PromptServer
 
@@ -123,19 +123,49 @@ async def download_model(request):
     os.makedirs(dest_dir, exist_ok=True)
     dest_file = os.path.join(dest_dir, filename)
 
+    response = web.StreamResponse(
+        status=200,
+        headers={"Content-Type": "application/x-ndjson", "Cache-Control": "no-cache"},
+    )
+    await response.prepare(request)
+
+    async def send_event(payload):
+        await response.write((json.dumps(payload) + "\n").encode("utf-8"))
+
     try:
-        with requests.get(url, stream=True, timeout=60) as resp:
-            resp.raise_for_status()
-            with open(dest_file, "wb") as out:
-                for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
+        timeout = aiohttp.ClientTimeout(total=None, connect=60, sock_read=300)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status >= 400:
+                    await send_event({"type": "error", "error": f"HTTP {resp.status}"})
+                    await response.write_eof()
+                    return response
+
+                total = int(resp.headers.get("Content-Length") or 0)
+                downloaded = 0
+                with open(dest_file, "wb") as out:
+                    async for chunk in resp.content.iter_chunked(1024 * 1024):
                         out.write(chunk)
-    except requests.RequestException as exc:
+                        downloaded += len(chunk)
+                        percent = round(downloaded * 100 / total) if total else None
+                        await send_event(
+                            {
+                                "type": "progress",
+                                "downloaded": downloaded,
+                                "total": total,
+                                "percent": percent,
+                            }
+                        )
+    except Exception as exc:
         if os.path.exists(dest_file):
             os.remove(dest_file)
-        return web.json_response({"error": str(exc)}, status=500)
+        await send_event({"type": "error", "error": str(exc)})
+        await response.write_eof()
+        return response
 
     if hasattr(folder_paths, "filename_list_cache"):
         folder_paths.filename_list_cache.clear()
 
-    return web.json_response({"ok": True, "path": dest_file})
+    await send_event({"type": "done", "path": dest_file})
+    await response.write_eof()
+    return response
