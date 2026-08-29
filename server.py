@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ EXTENSION_DIR = Path(__file__).parent
 DEFAULT_REGISTRY_PATH = EXTENSION_DIR / "registry.json"
 LOCAL_REGISTRY_PATH = EXTENSION_DIR / "registry.local.json"
 CONFIG_PATH = EXTENSION_DIR / "config.json"
+CHUNK_SIZE = 1024 * 1024
 
 
 def _get_registry_path():
@@ -63,6 +65,11 @@ def _find_entry(filename):
         if entry.get("filename") == filename:
             return entry
     return None
+
+
+def _write_chunk(path, data, mode="ab"):
+    with open(path, mode) as out:
+        out.write(data)
 
 
 @routes.get("/tasty-r2/list")
@@ -122,17 +129,30 @@ async def download_model(request):
     dest_dir = os.path.join(folder_paths.models_dir, save_path)
     os.makedirs(dest_dir, exist_ok=True)
     dest_file = os.path.join(dest_dir, filename)
+    temp_file = dest_file + ".partial"
 
     response = web.StreamResponse(
         status=200,
-        headers={"Content-Type": "application/x-ndjson", "Cache-Control": "no-cache"},
+        headers={
+            "Content-Type": "application/x-ndjson",
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )
     await response.prepare(request)
 
     async def send_event(payload):
         await response.write((json.dumps(payload) + "\n").encode("utf-8"))
+        await response.drain()
 
     try:
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+
+        await send_event(
+            {"type": "progress", "downloaded": 0, "total": 0, "percent": 0}
+        )
+
         timeout = aiohttp.ClientTimeout(total=None, connect=60, sock_read=300)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url) as resp:
@@ -143,24 +163,39 @@ async def download_model(request):
 
                 total = int(resp.headers.get("Content-Length") or 0)
                 downloaded = 0
-                with open(dest_file, "wb") as out:
-                    async for chunk in resp.content.iter_chunked(1024 * 1024):
-                        out.write(chunk)
-                        downloaded += len(chunk)
-                        percent = round(downloaded * 100 / total) if total else None
-                        await send_event(
-                            {
-                                "type": "progress",
-                                "downloaded": downloaded,
-                                "total": total,
-                                "percent": percent,
-                            }
-                        )
+                await send_event(
+                    {
+                        "type": "progress",
+                        "downloaded": 0,
+                        "total": total,
+                        "percent": 0 if total else None,
+                    }
+                )
+
+                async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
+                    if not chunk:
+                        continue
+                    await asyncio.to_thread(_write_chunk, temp_file, chunk, "ab")
+                    downloaded += len(chunk)
+                    percent = round(downloaded * 100 / total) if total else None
+                    await send_event(
+                        {
+                            "type": "progress",
+                            "downloaded": downloaded,
+                            "total": total,
+                            "percent": percent,
+                        }
+                    )
+
+        await asyncio.to_thread(os.replace, temp_file, dest_file)
     except Exception as exc:
-        if os.path.exists(dest_file):
-            os.remove(dest_file)
-        await send_event({"type": "error", "error": str(exc)})
-        await response.write_eof()
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+        try:
+            await send_event({"type": "error", "error": str(exc)})
+            await response.write_eof()
+        except Exception:
+            pass
         return response
 
     if hasattr(folder_paths, "filename_list_cache"):
