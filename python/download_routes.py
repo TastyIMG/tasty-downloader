@@ -99,10 +99,28 @@ async def download_via_rclone(r2, save_path, filename, url, temp_file, request, 
     if not rclone_binary_ready():
         await asyncio.to_thread(rclone_bin_or_install)
 
+    # Resolve size in parallel — never block transfer start for HEAD.
+    total_task = asyncio.create_task(url_content_length(url)) if url else None
+
     object_key = r2_model_object_key(save_path, filename)
     src = rclone_s3_uri(r2, object_key)
     cmd = build_rclone_s3_copyto_cmd(r2, src, temp_file, upload=False)
-    await run_rclone_with_progress(cmd, 0, request, send_event)
+    try:
+        await run_rclone_with_progress(
+            cmd,
+            0,
+            request,
+            send_event,
+            progress_path=temp_file,
+            total_task=total_task,
+        )
+    finally:
+        if total_task is not None and not total_task.done():
+            total_task.cancel()
+            try:
+                await total_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 @routes.get("/tasty-r2/list")
@@ -170,9 +188,16 @@ async def download_model(request):
 
     response, send_event = await prepare_ndjson(request)
 
+    def cleanup_partials():
+        for path in (temp_file, temp_file + ".partial"):
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
     try:
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
+        cleanup_partials()
 
         if use_rclone:
             await download_via_rclone(
@@ -183,16 +208,14 @@ async def download_model(request):
 
         await asyncio.to_thread(os.replace, temp_file, dest_file)
     except asyncio.CancelledError:
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
+        cleanup_partials()
         try:
             await response.write_eof()
         except Exception:
             pass
         return response
     except Exception as exc:
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
+        cleanup_partials()
         try:
             await send_event({"type": "error", "error": str(exc)})
             await response.write_eof()
