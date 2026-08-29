@@ -90,7 +90,7 @@ const styles = `
 }
 .tasty-r2-row {
   display: grid;
-  grid-template-columns: 1fr 90px;
+  grid-template-columns: 1fr 110px;
   gap: 8px;
   align-items: center;
   padding: 8px 16px 8px 36px;
@@ -135,6 +135,32 @@ const styles = `
   opacity: 0.5;
   cursor: wait;
 }
+.tasty-r2-action {
+  min-width: 110px;
+}
+.tasty-r2-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tasty-r2-progress-bar {
+  height: 6px;
+  background: #222;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.tasty-r2-progress-fill {
+  height: 100%;
+  background: #6a9;
+  width: 0%;
+  transition: width 0.15s ease;
+}
+.tasty-r2-progress-label {
+  font-size: 10px;
+  color: #aaa;
+  text-align: center;
+  line-height: 1.2;
+}
 .tasty-r2-empty {
   padding: 24px 16px;
   text-align: center;
@@ -146,6 +172,13 @@ const styles = `
   font-size: 12px;
 }
 `;
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
 
 class TastyR2Modal {
   constructor() {
@@ -171,7 +204,7 @@ class TastyR2Modal {
     this.overlay.innerHTML = `
       <div class="tasty-r2-modal">
         <div class="tasty-r2-header">
-          <h2>Tasty Models</h2>
+          <h2>Tasty Downloader</h2>
           <button class="tasty-r2-close" type="button">&times;</button>
         </div>
         <div class="tasty-r2-error"></div>
@@ -306,49 +339,122 @@ class TastyR2Modal {
 
     info.append(forModel, filename);
 
+    const action = document.createElement("div");
+    action.className = "tasty-r2-action";
+
     const btn = document.createElement("button");
     btn.className = "tasty-r2-btn";
     btn.type = "button";
     btn.textContent = "Download";
     btn.disabled = this.downloading.has(item.filename);
-    btn.onclick = () => this.download(item.filename, btn);
+    btn.onclick = () => this.download(item.filename, action);
 
-    row.append(info, btn);
+    action.appendChild(btn);
+    row.append(info, action);
     return row;
   }
 
-  async download(filename, btn) {
+  createProgress(actionEl) {
+    actionEl.innerHTML = `
+      <div class="tasty-r2-progress">
+        <div class="tasty-r2-progress-bar">
+          <div class="tasty-r2-progress-fill"></div>
+        </div>
+        <div class="tasty-r2-progress-label">Starting...</div>
+      </div>
+    `;
+    return {
+      fill: actionEl.querySelector(".tasty-r2-progress-fill"),
+      label: actionEl.querySelector(".tasty-r2-progress-label"),
+    };
+  }
+
+  updateProgress(progressEl, event) {
+    const { downloaded, total, percent } = event;
+    if (percent != null) {
+      progressEl.fill.style.width = `${percent}%`;
+      progressEl.label.textContent = `${percent}%`;
+      return;
+    }
+    progressEl.fill.style.width = total ? `${Math.min(100, Math.round((downloaded / total) * 100))}%` : "100%";
+    progressEl.label.textContent = total
+      ? `${formatBytes(downloaded)} / ${formatBytes(total)}`
+      : formatBytes(downloaded);
+  }
+
+  restoreDownloadButton(actionEl, filename) {
+    const btn = document.createElement("button");
+    btn.className = "tasty-r2-btn";
+    btn.type = "button";
+    btn.textContent = "Download";
+    btn.onclick = () => this.download(filename, actionEl);
+    actionEl.innerHTML = "";
+    actionEl.appendChild(btn);
+  }
+
+  async download(filename, actionEl) {
     if (this.downloading.has(filename)) return;
     this.downloading.add(filename);
-    btn.disabled = true;
-    btn.textContent = "Downloading...";
+    const progressEl = this.createProgress(actionEl);
     this.setError("");
 
     try {
-      const resp = await api.fetchApi("/tasty-r2/download", {
+      const apiBase = typeof api.apiURL === "function" ? api.apiURL() : api.apiURL;
+      const resp = await fetch(`${apiBase}/tasty-r2/download`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ filename }),
       });
-      const data = await resp.json();
-      if (!resp.ok) {
+
+      const contentType = resp.headers.get("content-type") || "";
+      if (!resp.ok || !contentType.includes("ndjson")) {
+        const data = await resp.json().catch(() => ({}));
         throw new Error(data.error || "Download failed");
       }
-      btn.textContent = "Download";
-      btn.disabled = false;
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let doneReceived = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const event = JSON.parse(line);
+          if (event.type === "progress") {
+            this.updateProgress(progressEl, event);
+          } else if (event.type === "done") {
+            doneReceived = true;
+            progressEl.fill.style.width = "100%";
+            progressEl.label.textContent = "Done";
+          } else if (event.type === "error") {
+            throw new Error(event.error || "Download failed");
+          }
+        }
+      }
+
+      if (!doneReceived) {
+        throw new Error("Download ended unexpectedly");
+      }
     } catch (err) {
       this.setError(`${filename}: ${err.message || err}`);
-      btn.disabled = false;
-      btn.textContent = "Download";
     } finally {
       this.downloading.delete(filename);
+      this.restoreDownloadButton(actionEl, filename);
     }
   }
 }
 
 const modal = new TastyR2Modal();
 
-function openTastyModels() {
+function openTastyDownloader() {
   modal.open();
 }
 
@@ -364,10 +470,10 @@ app.registerExtension({
   commands: [
     {
       id: "Comfy.TastyR2Downloader.open",
-      label: "Open Tasty Models",
-      menubarLabel: "Tasty Models",
+      label: "Open Tasty Downloader",
+      menubarLabel: "Tasty Downloader",
       icon: "pi pi-download",
-      function: openTastyModels,
+      function: openTastyDownloader,
     },
   ],
   menuCommands: [
@@ -383,9 +489,9 @@ app.registerExtension({
   actionBarButtons: [
     {
       icon: "icon-[lucide--download]",
-      label: "Tasty Models",
+      label: "Tasty Downloader",
       tooltip: "Download models from Tasty R2 registry",
-      onClick: openTastyModels,
+      onClick: openTastyDownloader,
     },
   ],
 });
