@@ -348,26 +348,44 @@ class TastyR2Modal {
 
 const modal = new TastyR2Modal();
 
+function openTastyModels() {
+  modal.open();
+}
+
 app.registerExtension({
   name: "Comfy.TastyR2Downloader",
-  setup() {
-    const id = "comfy-tasty-r2-button";
-    const attach = () => {
-      if (document.getElementById(id)) return;
-      const menu =
-        app.ui?.menu?.settingsGroup ||
-        document.querySelector(".comfy-menu") ||
-        document.getElementById("comfy-menu");
-      if (!menu) return;
-
-      const btn = document.createElement("button");
-      btn.id = id;
-      btn.textContent = "Tasty Models";
-      btn.onclick = () => modal.open();
-      btn.style.marginLeft = "4px";
-      menu.appendChild(btn);
-    };
-    attach();
-    setInterval(attach, 2000);
+  init() {
+    if (document.getElementById("tasty-r2-styles")) return;
+    const el = document.createElement("style");
+    el.id = "tasty-r2-styles";
+    el.textContent = styles;
+    document.head.appendChild(el);
   },
+  commands: [
+    {
+      id: "Comfy.TastyR2Downloader.open",
+      label: "Open Tasty Models",
+      menubarLabel: "Tasty Models",
+      icon: "pi pi-download",
+      function: openTastyModels,
+    },
+  ],
+  menuCommands: [
+    {
+      path: ["Tasty"],
+      commands: ["Comfy.TastyR2Downloader.open"],
+    },
+    {
+      path: ["Extensions", "Tasty R2 Downloader"],
+      commands: ["Comfy.TastyR2Downloader.open"],
+    },
+  ],
+  actionBarButtons: [
+    {
+      icon: "icon-[lucide--download]",
+      label: "Tasty Models",
+      tooltip: "Download models from Tasty R2 registry",
+      onClick: openTastyModels,
+    },
+  ],
 });
