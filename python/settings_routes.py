@@ -7,7 +7,7 @@ from server import PromptServer
 
 from .config_store import get_r2_config, load_config, r2_is_configured, save_config
 from .paths import CONFIG_PATH, DEFAULT_PUSH_FOLDERS, DEFAULT_R2, SECRET_PLACEHOLDER
-from .rclone_ops import ensure_rclone_remote, rclone_available, rclone_bin, run_cmd
+from .rclone_ops import rclone_available, rclone_bin, rclone_bin_or_install, rclone_s3_bucket_uri, run_cmd
 
 routes = PromptServer.instance.routes
 
@@ -250,22 +250,20 @@ async def save_settings(request):
 
     test = bool(body.get("test"))
     test_result = None
-    if test or r2_is_configured(cfg["r2"]):
+    if test and r2_is_configured(cfg["r2"]):
         try:
-            remote = await asyncio.to_thread(ensure_rclone_remote, cfg["r2"])
-            if test:
-                rclone = rclone_bin()
-                bucket = cfg["r2"]["bucket"]
-                result = await asyncio.to_thread(
-                    run_cmd,
-                    [rclone, "lsd", f"{remote}:{bucket}"],
-                    60,
+            await asyncio.to_thread(rclone_bin_or_install)
+            rclone = rclone_bin()
+            result = await asyncio.to_thread(
+                run_cmd,
+                [rclone, "lsd", rclone_s3_bucket_uri(cfg["r2"]), "--s3-no-check-bucket"],
+                60,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    (result.stderr or result.stdout or "rclone lsd failed").strip()
                 )
-                if result.returncode != 0:
-                    raise RuntimeError(
-                        (result.stderr or result.stdout or "rclone lsd failed").strip()
-                    )
-                test_result = "ok"
+            test_result = "ok"
         except Exception as exc:
             payload = settings_payload()
             payload.update({"ok": False, "saved": True, "error": str(exc)})
