@@ -6,15 +6,16 @@ from aiohttp import web
 from server import PromptServer
 
 from .config_store import get_r2_config, load_config, r2_is_configured, save_config
-from .paths import DEFAULT_PUSH_FOLDERS, DEFAULT_R2, SECRET_PLACEHOLDER
+from .paths import CONFIG_PATH, DEFAULT_PUSH_FOLDERS, DEFAULT_R2, SECRET_PLACEHOLDER
 from .rclone_ops import ensure_rclone_remote, rclone_available, rclone_bin, run_cmd
 
 routes = PromptServer.instance.routes
 
 
-def settings_payload():
-    cfg = load_config()
+def settings_payload(cfg=None):
+    cfg = cfg if cfg is not None else load_config()
     r2 = get_r2_config()
+    models = cfg.get("models") if isinstance(cfg.get("models"), list) else []
     return {
         "registry_path": cfg.get("registry_path") or "",
         "account_id": r2.get("account_id") or "",
@@ -28,12 +29,29 @@ def settings_payload():
         "chunk_size": r2.get("chunk_size") or "64M",
         "upload_concurrency": r2.get("upload_concurrency") or 8,
         "push_folders": r2.get("push_folders") or list(DEFAULT_PUSH_FOLDERS),
-        "models_count": len(cfg.get("models") or [])
-        if isinstance(cfg.get("models"), list)
-        else 0,
+        "models_count": len(models),
         "rclone_available": rclone_available(),
         "configured": r2_is_configured(r2),
     }
+
+
+def finish_load_response(remote, config_url=""):
+    """Save pulled config and return payload with verified counts."""
+    models_in = remote.get("models") if isinstance(remote.get("models"), list) else []
+    apply_pulled_config(remote, config_url)
+    saved = load_config()
+    models_saved = saved.get("models") if isinstance(saved.get("models"), list) else []
+    if len(models_in) > 0 and len(models_saved) == 0:
+        raise RuntimeError(
+            f"Config saved but models missing on disk ({CONFIG_PATH}). Check permissions."
+        )
+    payload = settings_payload(saved)
+    payload["models_loaded"] = len(models_in)
+    payload["models_count"] = len(models_saved)
+    payload["ok"] = True
+    payload["saved"] = True
+    payload["loaded"] = True
+    return payload
 
 
 async def fetch_remote_config(url):
@@ -96,13 +114,11 @@ async def pull_settings(request):
     pasted = body.get("config")
     if isinstance(pasted, dict):
         try:
-            apply_pulled_config(pasted, (body.get("config_url") or "").strip())
+            return web.json_response(
+                finish_load_response(pasted, (body.get("config_url") or "").strip())
+            )
         except Exception as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
-        payload = settings_payload()
-        payload["ok"] = True
-        payload["pulled"] = True
-        return web.json_response(payload)
 
     url = (body.get("config_url") or "").strip()
     if not url:
@@ -122,14 +138,9 @@ async def pull_settings(request):
 
     try:
         remote = await fetch_remote_config(url)
-        apply_pulled_config(remote, url)
+        return web.json_response(finish_load_response(remote, url))
     except Exception as exc:
         return web.json_response({"ok": False, "error": str(exc)}, status=400)
-
-    payload = settings_payload()
-    payload["ok"] = True
-    payload["pulled"] = True
-    return web.json_response(payload)
 
 
 @routes.post("/tasty-r2/settings")
@@ -139,34 +150,36 @@ async def save_settings(request):
     except json.JSONDecodeError:
         return web.json_response({"error": "Invalid JSON body"}, status=400)
 
+    load_only = bool(body.get("load") or body.get("pull"))
+
     # Load from pasted config or hosted URL (same route — no extra path needed).
     if isinstance(body.get("config"), dict):
         try:
-            apply_pulled_config(body["config"], (body.get("config_url") or "").strip())
+            return web.json_response(
+                finish_load_response(body["config"], (body.get("config_url") or "").strip())
+            )
         except Exception as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
-        payload = settings_payload()
-        payload.update({"ok": True, "saved": True, "loaded": True})
-        return web.json_response(payload)
 
-    load_only = bool(body.get("load") or body.get("pull"))
     config_url = (body.get("config_url") or "").strip()
-    if load_only and config_url:
+    if load_only:
+        if not config_url:
+            return web.json_response(
+                {"error": "Paste a config URL or config.json contents, then Load"},
+                status=400,
+            )
         if config_url.startswith("{"):
             return web.json_response(
-                {"error": "Paste JSON in the config box below, then Load"},
+                {"error": "Paste JSON in the box below, not the URL field"},
                 status=400,
             )
         if not config_url.startswith(("http://", "https://")):
             return web.json_response({"error": "Config URL must be http(s)"}, status=400)
         try:
             remote = await fetch_remote_config(config_url)
-            apply_pulled_config(remote, config_url)
+            return web.json_response(finish_load_response(remote, config_url))
         except Exception as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
-        payload = settings_payload()
-        payload.update({"ok": True, "saved": True, "loaded": True})
-        return web.json_response(payload)
 
     config_url = (body.get("config_url") or "").strip()
     want_pull = bool(body.get("pull"))
@@ -184,6 +197,7 @@ async def save_settings(request):
 
     cfg = load_config()
     r2 = {**cfg.get("r2", {})}
+    models = cfg.get("models") if isinstance(cfg.get("models"), list) else []
 
     if "registry_path" in body:
         cfg["registry_path"] = (body.get("registry_path") or "").strip()
@@ -231,6 +245,7 @@ async def save_settings(request):
         r2["public_base_url"] = pub
 
     cfg["r2"] = {**DEFAULT_R2, **r2}
+    cfg["models"] = models
     save_config(cfg)
 
     test = bool(body.get("test"))

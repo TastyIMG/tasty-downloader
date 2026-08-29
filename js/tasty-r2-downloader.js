@@ -884,6 +884,26 @@ class TastyR2Modal {
     }
   }
 
+  formatLoadStatus(data) {
+    if (!data?.loaded) {
+      return "Load did not run — restart ComfyUI and hard-refresh, then try again.";
+    }
+    const parts = [];
+    const n = data.models_count ?? 0;
+    const loaded = data.models_loaded ?? n;
+    if (loaded > 0 && n === 0) {
+      return `Load failed: source had ${loaded} models but none saved to config.json`;
+    }
+    parts.push(`${n} model${n === 1 ? "" : "s"}`);
+    if (data.bucket) parts.push(`bucket ${data.bucket}`);
+    else parts.push("bucket missing");
+    if (data.account_id) parts.push("account OK");
+    else parts.push("account missing");
+    if (data.configured) parts.push("R2 ready");
+    else parts.push("R2 incomplete — check keys in saved config");
+    return parts.join(" · ");
+  }
+
   renderSettings(data) {
     const folders = (data.push_folders || []).join(", ");
     const modelsNote =
@@ -1003,10 +1023,18 @@ class TastyR2Modal {
         if (!resp.ok || data.ok === false) {
           throw new Error(data.error || "Load failed");
         }
+        if (!data.loaded) {
+          throw new Error(
+            "Server ignored Load (old code?). Restart ComfyUI, hard-refresh, try again."
+          );
+        }
         this.renderSettings(data);
         const st = this.body.querySelector("[data-status]");
         if (st) {
-          st.textContent = `Loaded. ${data.models_count || 0} models · fields populated.`;
+          st.textContent = this.formatLoadStatus(data);
+        }
+        if ((data.models_loaded ?? 0) > 0 && (data.models_count ?? 0) === 0) {
+          this.setError(this.formatLoadStatus(data));
         }
       } catch (err) {
         status.textContent = "";
