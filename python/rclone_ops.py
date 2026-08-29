@@ -25,46 +25,53 @@ RCLONE_VERSION = "v1.68.2"
 _install_lock = threading.Lock()
 
 
-def _rclone_conn_value(value: str) -> str:
-    """Quote connection-string values that would break ``:s3,k=v:path`` parsing.
+def r2_endpoint(r2) -> str:
+    endpoint = (r2.get("endpoint") or "").strip().rstrip("/")
+    if endpoint:
+        return endpoint
+    account = (r2.get("account_id") or "").strip()
+    if not account:
+        raise RuntimeError("R2 endpoint or account_id required")
+    return f"https://{account}.r2.cloudflarestorage.com"
 
-    Unquoted ``endpoint=https://…`` is cut at the first ``:``, so rclone sees
-    endpoint=``https`` and fails with "Custom endpoint `https` was not a valid URI".
+
+def rclone_s3_path(r2, object_key: str = "") -> str:
+    """Path-only remote. Credentials go in ``rclone_s3_backend_flags`` — never in this string.
+
+    Vast/rclone choke on ``:s3,endpoint=https://…:bucket`` (``:`` truncates the URL to
+    ``https``). Same pattern as AGENTS.md ``config create``: endpoint is a separate arg.
     """
-    text = str(value or "")
-    if not any(ch in text for ch in (",", ":", "\\", '"')):
-        return text
-    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    bucket = r2["bucket"]
+    key = object_key.replace("\\", "/").lstrip("/")
+    if key:
+        return f":s3:{bucket}/{key}"
+    return f":s3:{bucket}"
+
+
+def rclone_s3_backend_flags(r2) -> list:
+    """S3/R2 auth as argv flags (safe on Vast; no connection-string colon parsing)."""
+    return [
+        "--s3-provider",
+        "Cloudflare",
+        "--s3-access-key-id",
+        str(r2["access_key_id"]),
+        "--s3-secret-access-key",
+        str(r2["secret_access_key"]),
+        "--s3-endpoint",
+        r2_endpoint(r2),
+        "--s3-region",
+        "auto",
+        "--s3-no-check-bucket",
+    ]
 
 
 def rclone_s3_uri(r2, object_key: str) -> str:
-    """Inline S3 path — no `rclone config create`, no warm/ready state."""
-    endpoint = r2.get("endpoint") or f"https://{r2['account_id']}.r2.cloudflarestorage.com"
-    bucket = r2["bucket"]
-    key = object_key.replace("\\", "/").lstrip("/")
-    opts = (
-        "provider=Cloudflare,"
-        f"access_key_id={_rclone_conn_value(r2['access_key_id'])},"
-        f"secret_access_key={_rclone_conn_value(r2['secret_access_key'])},"
-        f"endpoint={_rclone_conn_value(endpoint)},"
-        "region=auto,"
-        "no_check_bucket=true"
-    )
-    return f":s3,{opts}:{bucket}/{key}"
+    """Alias for ``rclone_s3_path`` — keep call sites working."""
+    return rclone_s3_path(r2, object_key)
 
 
 def rclone_s3_bucket_uri(r2) -> str:
-    endpoint = r2.get("endpoint") or f"https://{r2['account_id']}.r2.cloudflarestorage.com"
-    bucket = r2["bucket"]
-    opts = (
-        "provider=Cloudflare,"
-        f"access_key_id={_rclone_conn_value(r2['access_key_id'])},"
-        f"secret_access_key={_rclone_conn_value(r2['secret_access_key'])},"
-        f"endpoint={_rclone_conn_value(endpoint)},"
-        "region=auto,"
-        "no_check_bucket=true"
-    )
-    return f":s3,{opts}:{bucket}"
+    return rclone_s3_path(r2)
 
 
 def bootstrap_rclone_binary_async():
@@ -114,16 +121,16 @@ def upload_transfer_options(file_size: int, r2) -> tuple[str, int]:
 def delete_r2_object(r2, object_key):
     """Remove a stale/partial object before re-upload (best-effort; ignore missing)."""
     rclone = rclone_bin()
-    target = rclone_s3_uri(r2, object_key)
-    run_cmd([rclone, "deletefile", target, "--s3-no-check-bucket"], timeout=300)
+    target = rclone_s3_path(r2, object_key)
+    run_cmd([rclone, "deletefile", target, *rclone_s3_backend_flags(r2)], timeout=300)
 
 
 def rclone_object_size(r2, object_key):
     """Return remote object size in bytes, or 0 if unknown."""
     rclone = rclone_bin()
-    target = rclone_s3_uri(r2, object_key)
+    target = rclone_s3_path(r2, object_key)
     result = run_cmd(
-        [rclone, "lsjson", target, "--files-only", "--s3-no-check-bucket"],
+        [rclone, "lsjson", target, "--files-only", *rclone_s3_backend_flags(r2)],
         timeout=120,
     )
     if result.returncode != 0:
@@ -536,7 +543,7 @@ def build_rclone_s3_copyto_cmd(r2, src, dest, *, upload=False, file_size=0):
         dest,
         "-v",
         "--use-json-log",
-        "--s3-no-check-bucket",
+        *rclone_s3_backend_flags(r2),
         "--s3-chunk-size",
         chunk_size,
         "--stats",

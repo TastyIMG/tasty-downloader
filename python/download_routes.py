@@ -200,9 +200,29 @@ async def download_model(request):
         cleanup_partials()
 
         if use_rclone:
-            await download_via_rclone(
-                r2, save_path, filename, url, temp_file, request, send_event
-            )
+            try:
+                await download_via_rclone(
+                    r2, save_path, filename, url, temp_file, request, send_event
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as rclone_exc:
+                # Vast bypass: public URL still works when S3/rclone auth path fails.
+                cleanup_partials()
+                await send_event(
+                    {
+                        "type": "progress",
+                        "downloaded": 0,
+                        "total": 0,
+                        "percent": 0,
+                    }
+                )
+                try:
+                    await download_via_http(url, temp_file, request, send_event)
+                except Exception as http_exc:
+                    raise RuntimeError(
+                        f"rclone failed ({rclone_exc}); HTTP fallback failed ({http_exc})"
+                    ) from http_exc
         else:
             await download_via_http(url, temp_file, request, send_event)
 
