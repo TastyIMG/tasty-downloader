@@ -17,6 +17,7 @@ Everything that broke or shipped wrong in this project. **Append new rows; do no
 | Manual rclone install | Docs/UI told users to `curl install.sh \| sudo bash` | Auto-download official rclone zip to `$EXT/bin/rclone` on first use; gitignore `bin/` |
 | Blocking **“Preparing rclone”** / warm-ready HTTP fallback | `config create` + cache + dual paths on every click | **Inline `:s3,...:bucket/key` URIs** from `config.json` — spawn rclone immediately; bootstrap binary once at ComfyUI start |
 | Download stuck at **0%** after deploy | Relied on parsing rclone stdout (buffered / wrong format); rclone also wrote to `*.partial.partial` then renamed at end so dest size stayed 0 | Poll growing local file size every 0.25s; `--inplace` + `--multi-thread-streams 0` so bytes land on the path we poll; HEAD total in parallel (non-blocking) |
+| rclone `Custom endpoint \`https\` was not a valid URI` | Inline `:s3,endpoint=https://…:bucket/key` — unquoted URL `:` truncates endpoint to `https` | Quote connection-string values that contain `:` (and `,` `\` `"`) |
 
 ---
 
