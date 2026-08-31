@@ -397,17 +397,30 @@ def scan_push_candidates():
                     size = os.path.getsize(full)
                 except OSError:
                     size = 0
+                try:
+                    mtime = os.path.getmtime(full)
+                except OSError:
+                    mtime = 0
                 results.append(
                     {
                         "filename": filename,
                         "save_path": save_path,
                         "for_model": Path(filename).stem,
                         "size": size,
+                        "mtime": mtime,
                         "registered": key in registered or filename in registered,
                     }
                 )
 
-    results.sort(key=lambda item: (item["save_path"], item["filename"].lower()))
+    # Newest on disk first so ComfyUI-just-downloaded models aren't buried.
+    results.sort(
+        key=lambda item: (
+            1 if item["registered"] else 0,
+            -float(item.get("mtime") or 0),
+            item["save_path"],
+            item["filename"].lower(),
+        )
+    )
     return results
 
 

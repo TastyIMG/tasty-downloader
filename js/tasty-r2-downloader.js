@@ -51,6 +51,25 @@ const styles = `
   gap: 0;
   border-bottom: 1px solid #555;
   padding: 0 8px;
+  align-items: stretch;
+}
+.tasty-r2-tab-spacer {
+  flex: 1;
+}
+.tasty-r2-refresh {
+  background: transparent;
+  border: none;
+  color: #8af;
+  padding: 10px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  align-self: center;
+}
+.tasty-r2-refresh:hover {
+  color: #fff;
+}
+.tasty-r2-section-meta.new {
+  color: #8d8;
 }
 .tasty-r2-tab {
   background: transparent;
@@ -330,6 +349,8 @@ class TastyR2Modal {
     this.abortControllers = new Map();
     // Live transfer UI state — survives panel close; only Cancel aborts.
     this.transferUi = new Map();
+    this.pushPollTimer = null;
+    this.pushRefreshInFlight = false;
     this.openSections = {
       download: new Set(),
       push: new Set(),
@@ -358,6 +379,8 @@ class TastyR2Modal {
           <button class="tasty-r2-tab active" data-tab="download" type="button">Download</button>
           <button class="tasty-r2-tab" data-tab="push" type="button">Push</button>
           <button class="tasty-r2-tab" data-tab="settings" type="button">Settings</button>
+          <span class="tasty-r2-tab-spacer"></span>
+          <button class="tasty-r2-refresh" type="button" title="Rescan local models">Refresh</button>
         </div>
         <div class="tasty-r2-error"></div>
         <div class="tasty-r2-body">Loading...</div>
@@ -368,6 +391,7 @@ class TastyR2Modal {
     this.errorEl = this.overlay.querySelector(".tasty-r2-error");
     this.tabsEl = this.overlay.querySelector(".tasty-r2-tabs");
     this.overlay.querySelector(".tasty-r2-close").onclick = () => this.close();
+    this.overlay.querySelector(".tasty-r2-refresh").onclick = () => this.refreshActiveTab();
     this.overlay.addEventListener("click", (e) => {
       if (e.target === this.overlay) this.close();
     });
@@ -379,12 +403,33 @@ class TastyR2Modal {
 
   close() {
     // Closing the panel must NOT cancel transfers — only the Cancel button does.
+    this.stopPushPolling();
     for (const state of this.transferUi.values()) {
       state.progressEl = null;
     }
     if (this.overlay) {
       this.overlay.remove();
       this.overlay = null;
+    }
+  }
+
+  refreshActiveTab() {
+    if (this.tab === "download") this.refreshDownload();
+    else if (this.tab === "push") this.refreshPush({ silent: false });
+    else this.refreshSettings();
+  }
+
+  startPushPolling() {
+    this.stopPushPolling();
+    this.pushPollTimer = setInterval(() => {
+      if (this.tab === "push" && this.overlay) this.refreshPush({ silent: true });
+    }, 4000);
+  }
+
+  stopPushPolling() {
+    if (this.pushPollTimer) {
+      clearInterval(this.pushPollTimer);
+      this.pushPollTimer = null;
     }
   }
 
@@ -398,11 +443,16 @@ class TastyR2Modal {
       for (const btn of this.tabsEl.querySelectorAll(".tasty-r2-tab")) {
         btn.classList.toggle("active", btn.dataset.tab === tab);
       }
+      const refreshBtn = this.overlay?.querySelector(".tasty-r2-refresh");
+      if (refreshBtn) refreshBtn.style.visibility = tab === "settings" ? "hidden" : "visible";
     }
     this.setError("");
+    this.stopPushPolling();
     if (tab === "download") this.refreshDownload();
-    else if (tab === "push") this.refreshPush();
-    else this.refreshSettings();
+    else if (tab === "push") {
+      this.refreshPush({ silent: false });
+      this.startPushPolling();
+    } else this.refreshSettings();
   }
 
   sortCategories(keys) {
@@ -434,11 +484,26 @@ class TastyR2Modal {
     if (!openSet.size) {
       for (const cat of categories) openSet.add(cat);
     }
+    // Always expand folders that have not-yet-pushed files (e.g. ComfyUI downloads).
+    if (sectionKey === "push") {
+      for (const cat of categories) {
+        if (grouped.get(cat).some((item) => !item.registered)) openSet.add(cat);
+      }
+    }
 
     this.body.innerHTML = "";
     for (const category of categories) {
-      const sectionItems = grouped.get(category);
+      const sectionItems = [...grouped.get(category)];
+      if (sectionKey === "push") {
+        sectionItems.sort((a, b) => {
+          if (!!a.registered !== !!b.registered) return a.registered ? 1 : -1;
+          return (b.mtime || 0) - (a.mtime || 0);
+        });
+      }
       const isOpen = openSet.has(category);
+      const pushable = sectionKey === "push"
+        ? sectionItems.filter((item) => !item.registered).length
+        : 0;
 
       const section = document.createElement("div");
       section.className = `tasty-r2-section${isOpen ? " open" : ""}`;
@@ -446,10 +511,14 @@ class TastyR2Modal {
       const header = document.createElement("button");
       header.type = "button";
       header.className = "tasty-r2-section-header";
+      const metaClass = pushable ? "tasty-r2-section-meta new" : "tasty-r2-section-meta";
+      const metaText = pushable
+        ? `${pushable} to push · ${sectionItems.length}`
+        : `${sectionItems.length}`;
       header.innerHTML = `
         <span class="tasty-r2-chevron">${isOpen ? "▼" : "▶"}</span>
         <span class="tasty-r2-section-title">${category}</span>
-        <span class="tasty-r2-section-meta">${sectionItems.length}</span>
+        <span class="${metaClass}">${metaText}</span>
       `;
       header.onclick = () => {
         if (openSet.has(category)) openSet.delete(category);
@@ -492,12 +561,18 @@ class TastyR2Modal {
     }
   }
 
-  async refreshPush() {
-    this.body.innerHTML = `<div class="tasty-r2-empty">Loading...</div>`;
+  async refreshPush({ silent = false } = {}) {
+    if (this.pushRefreshInFlight) return;
+    this.pushRefreshInFlight = true;
+    if (!silent) {
+      this.body.innerHTML = `<div class="tasty-r2-empty">Scanning local models...</div>`;
+    }
     try {
       const resp = await api.fetchApi("/tasty-r2/push-list");
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || "Failed to load push list");
+
+      if (this.tab !== "push" || !this.overlay) return;
 
       if (!data.rclone_available) {
         this.body.innerHTML = `<div class="tasty-r2-empty">rclone is not supported on this OS/arch.</div>`;
@@ -509,9 +584,10 @@ class TastyR2Modal {
       }
 
       const items = data.items || [];
-      for (const item of items) {
-        if (item.registered) this.pushed.add(item.filename);
-      }
+      // Rebuild from disk/registry each scan — don't keep a stale session set.
+      this.pushed = new Set(
+        items.filter((item) => item.registered).map((item) => item.filename),
+      );
       this.renderGrouped(
         items,
         "push",
@@ -519,8 +595,12 @@ class TastyR2Modal {
         "No local models found in configured push folders",
       );
     } catch (err) {
-      this.body.innerHTML = `<div class="tasty-r2-empty">Failed to load push list</div>`;
-      this.setError(String(err.message || err));
+      if (!silent) {
+        this.body.innerHTML = `<div class="tasty-r2-empty">Failed to load push list</div>`;
+        this.setError(String(err.message || err));
+      }
+    } finally {
+      this.pushRefreshInFlight = false;
     }
   }
 
